@@ -1,0 +1,7 @@
+venv/
+build_venv/
+build/
+dist/
+*.spec
+__pycache__/
+voices/
