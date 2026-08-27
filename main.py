@@ -135,15 +135,6 @@ class App(ctk.CTk):
         self.status_label = ctk.CTkLabel(self, text="Подготовка на българския глас...", text_color="orange")
         self.status_label.pack(fill="x", padx=14)
 
-        opts = ctk.CTkFrame(self)
-        opts.pack(fill="x", **pad)
-
-        self.read_username_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            opts, text="Чети и потребителското име преди коментара",
-            variable=self.read_username_var
-        ).pack(side="left")
-
         filt = ctk.CTkFrame(self)
         filt.pack(fill="x", **pad)
 
@@ -206,6 +197,18 @@ class App(ctk.CTk):
         banned = [w.strip().lower() for w in raw.split(",") if w.strip()]
         low = text.lower()
         return any(b in low for b in banned)
+
+    def _enqueue_latest_only(self, text: str):
+        # Изхвърляме всичко чакащо в опашката (все още неизговорено) и слагаме
+        # само най-новия коментар, за да не се трупа "изоставане" при много
+        # коментари наведнъж. Коментарът, който в момента се изговаря, не се
+        # прекъсва — само чакащите зад него отпадат.
+        try:
+            while True:
+                self.speech_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self.speech_queue.put(text)
 
     # ------------------------------------------------------------------
     # Изговорчик (worker thread)
@@ -294,8 +297,8 @@ class App(ctk.CTk):
                 self._log("   -> [филтрирано, не се изговаря]")
                 return
 
-            speech_text = f"{nickname} каза: {comment}" if self.read_username_var.get() else comment
-            self.speech_queue.put(speech_text)
+            speech_text = comment
+            self._enqueue_latest_only(speech_text)
 
         @client.on(DisconnectEvent)
         async def on_disconnect(_event: DisconnectEvent):
