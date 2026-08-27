@@ -31,6 +31,7 @@ from piper.download_voices import download_voice
 
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import ConnectEvent, DisconnectEvent, CommentEvent, LiveEndEvent
+from TikTokLive.client.web.web_settings import WebDefaults
 
 # --------------------------------------------------------------------------
 # Настройки
@@ -122,6 +123,16 @@ class App(ctk.CTk):
         ctk.CTkLabel(top, text="TikTok потребителско име:").pack(side="left", padx=(0, 8))
         self.username_entry = ctk.CTkEntry(top, placeholder_text="напр. someusername (без @)")
         self.username_entry.pack(side="left", fill="x", expand=True)
+
+        key_frame = ctk.CTkFrame(self)
+        key_frame.pack(fill="x", **pad)
+        ctk.CTkLabel(key_frame, text="Euler Stream API ключ (по избор, виж README):").pack(
+            side="left", padx=(0, 8)
+        )
+        self.api_key_entry = ctk.CTkEntry(
+            key_frame, placeholder_text="оставяш празно за безплатен общ лимит"
+        )
+        self.api_key_entry.pack(side="left", fill="x", expand=True)
 
         btns = ctk.CTkFrame(self)
         btns.pack(fill="x", **pad)
@@ -253,6 +264,9 @@ class App(ctk.CTk):
         self.stop_btn.configure(state="normal")
         self.status_label.configure(text=f"Свързване към @{username} ...", text_color="orange")
 
+        api_key = self.api_key_entry.get().strip()
+        WebDefaults.tiktok_sign_api_key = api_key if api_key else None
+
         self.tiktok_thread = threading.Thread(
             target=self._run_tiktok_client, args=(username,), daemon=True
         )
@@ -312,6 +326,13 @@ class App(ctk.CTk):
             self.tiktok_loop.run_until_complete(client.connect(fetch_live_check=True))
         except Exception as e:
             self._log(f"[Грешка при връзка] {e}")
+            self._log(
+                "[Съвет] Тази грешка (HTTP 400 / rejected websocket) обикновено значи, "
+                "че безплатният общ лимит на сървъра за подпис (Euler Stream) е зает. "
+                "Провери дали потребителят е наистина на живо и, ако продължава, "
+                "вземи безплатен API ключ от https://www.eulerstream.com и го сложи "
+                "в полето 'Euler Stream API ключ' по-горе."
+            )
             traceback.print_exc()
         finally:
             self.is_running = False
