@@ -16,8 +16,8 @@ pip install -r requirements.txt
 echo [3/4] Building .exe with PyInstaller...
 pyinstaller --noconfirm --onefile --windowed --name TikTokTTS ^
     --collect-all customtkinter ^
-    --collect-all piper ^
-    --collect-all pygame ^
+    --collect-data piper ^
+    --collect-submodules piper ^
     --collect-all TikTokLive ^
     main.py
 
