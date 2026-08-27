@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import traceback
+from collections import deque
 from pathlib import Path
 
 import customtkinter as ctk
@@ -30,8 +31,15 @@ from piper import PiperVoice
 from piper.download_voices import download_voice
 
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import ConnectEvent, DisconnectEvent, CommentEvent, LiveEndEvent
+from TikTokLive.events import ConnectEvent, DisconnectEvent, CommentEvent, LiveEndEvent, GiftEvent
 from TikTokLive.client.web.web_settings import WebDefaults
+
+HEART_ME_GIFT_NAME = "heart me"  # сравнява се без главни/малки букви
+
+# Анти-спам настройки
+SPAM_WINDOW_SECONDS = 12          # прозорец за проверка
+SPAM_SAME_USER_MAX = 3            # макс. коментари от 1 човек в прозореца
+SPAM_SAME_TEXT_MAX = 2            # макс. пъти един и същ текст (от всякакви хора) в прозореца
 
 # --------------------------------------------------------------------------
 # Настройки
@@ -96,6 +104,11 @@ class App(ctk.CTk):
         self.tiktok_client: TikTokLiveClient | None = None
         self.is_running = False
 
+        # Анти-спам: последните коментари (време, потребител, нормализиран текст)
+        self.recent_comments: "deque" = deque(maxlen=50)
+        # Потребители (unique_id), които поне веднъж са пратили подаръка "Heart Me"
+        self.heart_me_senders: set[str] = set()
+
         self._build_ui()
 
         try:
@@ -156,6 +169,28 @@ class App(ctk.CTk):
         )
         self.filter_entry.pack(side="left", fill="x", expand=True)
 
+        extra = ctk.CTkFrame(self)
+        extra.pack(fill="x", **pad)
+
+        self.spam_filter_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(extra, text="Анти-спам защита", variable=self.spam_filter_var).pack(
+            side="left", padx=(0, 16)
+        )
+
+        self.heart_me_filter_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            extra,
+            text="Само от Heart Me донори + абонати на канала",
+            variable=self.heart_me_filter_var,
+        ).pack(side="left", padx=(0, 16))
+
+        maxlen = ctk.CTkFrame(self)
+        maxlen.pack(fill="x", **pad)
+        ctk.CTkLabel(maxlen, text="Макс. брой символи за четене:").pack(side="left", padx=(0, 8))
+        self.max_chars_entry = ctk.CTkEntry(maxlen, width=80, placeholder_text="200")
+        self.max_chars_entry.insert(0, "200")
+        self.max_chars_entry.pack(side="left")
+
         ctk.CTkLabel(self, text="Лог на коментарите:").pack(anchor="w", padx=14)
 
         self.log_box = ctk.CTkTextbox(self, wrap="word")
@@ -208,6 +243,61 @@ class App(ctk.CTk):
         banned = [w.strip().lower() for w in raw.split(",") if w.strip()]
         low = text.lower()
         return any(b in low for b in banned)
+
+    def _is_spam(self, user_key: str, text: str) -> bool:
+        """Анти-спам: твърде много коментари от 1 човек или твърде много
+        еднакви съобщения (copy-paste flood) за кратко време."""
+        if not self.spam_filter_var.get():
+            return False
+
+        now = time.time()
+        normalized = re.sub(r"\s+", " ", text.strip().lower())
+
+        # чистим старите записи извън прозореца
+        while self.recent_comments and now - self.recent_comments[0][0] > SPAM_WINDOW_SECONDS:
+            self.recent_comments.popleft()
+
+        same_user_count = sum(1 for _, u, _ in self.recent_comments if u == user_key)
+        same_text_count = sum(1 for _, _, t in self.recent_comments if t == normalized and normalized)
+
+        self.recent_comments.append((now, user_key, normalized))
+
+        if same_user_count >= SPAM_SAME_USER_MAX:
+            return True
+        if normalized and same_text_count >= SPAM_SAME_TEXT_MAX:
+            return True
+        return False
+
+    def _is_eligible_heart_me_member(self, user) -> bool:
+        """Проверява дали потребителят е абонат на канала И поне веднъж
+        е пращал подаръка 'Heart Me'."""
+        if not self.heart_me_filter_var.get():
+            return True
+
+        user_key = getattr(user, "unique_id", None) or str(getattr(user, "user_id", ""))
+        is_subscriber = False
+        try:
+            is_subscriber = user.has_badge("SUBSCRIBER")
+        except Exception:
+            pass
+
+        return is_subscriber and (user_key in self.heart_me_senders)
+
+    def _truncate_to_max_chars(self, text: str) -> str:
+        raw = self.max_chars_entry.get().strip()
+        try:
+            max_chars = int(raw) if raw else 200
+        except ValueError:
+            max_chars = 200
+        if max_chars <= 0 or len(text) <= max_chars:
+            return text
+        # режем на границата на дума, ако е възможно, за да не се получи
+        # накъсана дума по средата
+        cut = text[:max_chars]
+        last_space = cut.rfind(" ")
+        if last_space > max_chars * 0.6:
+            cut = cut[:last_space]
+        return cut.strip()
 
     def _enqueue_latest_only(self, text: str):
         # Изхвърляме всичко чакащо в опашката (все още неизговорено) и слагаме
@@ -301,6 +391,10 @@ class App(ctk.CTk):
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
             nickname = event.user.nickname if event.user else "???"
+            user_key = (
+                (getattr(event.user, "unique_id", None) or str(getattr(event.user, "user_id", "")))
+                if event.user else "unknown"
+            )
             comment = clean_text_for_speech(event.comment or "")
             if not comment:
                 return
@@ -308,11 +402,32 @@ class App(ctk.CTk):
             self._log(f"{nickname}: {comment}")
 
             if self._is_filtered(comment):
-                self._log("   -> [филтрирано, не се изговаря]")
+                self._log("   -> [филтрирано по забранена дума]")
                 return
 
-            speech_text = comment
+            if self._is_spam(user_key, comment):
+                self._log("   -> [филтрирано като спам]")
+                return
+
+            if event.user and not self._is_eligible_heart_me_member(event.user):
+                self._log("   -> [филтрирано: не е Heart Me донор + абонат]")
+                return
+
+            speech_text = self._truncate_to_max_chars(comment)
             self._enqueue_latest_only(speech_text)
+
+        @client.on(GiftEvent)
+        async def on_gift(event: GiftEvent):
+            if not event.user or not event.gift:
+                return
+            gift_name = (event.gift.name or "").strip().lower()
+            if gift_name == HEART_ME_GIFT_NAME:
+                user_key = getattr(event.user, "unique_id", None) or str(
+                    getattr(event.user, "user_id", "")
+                )
+                if user_key and user_key not in self.heart_me_senders:
+                    self.heart_me_senders.add(user_key)
+                    self._log(f"[Система] {event.user.nickname} прати Heart Me — вече е допустим.")
 
         @client.on(DisconnectEvent)
         async def on_disconnect(_event: DisconnectEvent):
