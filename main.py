@@ -102,12 +102,16 @@ class App(ctk.CTk):
         self.tiktok_thread: threading.Thread | None = None
         self.tiktok_loop: asyncio.AbstractEventLoop | None = None
         self.tiktok_client: TikTokLiveClient | None = None
+        self.tikfinity_loop: asyncio.AbstractEventLoop | None = None
+        self.tikfinity_ws = None
         self.is_running = False
 
         # Анти-спам: последните коментари (време, потребител, нормализиран текст)
         self.recent_comments: "deque" = deque(maxlen=50)
         # Потребители (unique_id), които поне веднъж са пратили подаръка "Heart Me"
         self.heart_me_senders: set[str] = set()
+        # Потребители, за които имаме директно потвърждение за абонамент (през TikFinity "subscribe" събитие)
+        self.confirmed_subscribers: set[str] = set()
 
         self._build_ui()
 
@@ -130,8 +134,20 @@ class App(ctk.CTk):
     def _build_ui(self):
         pad = {"padx": 14, "pady": 8}
 
+        mode_frame = ctk.CTkFrame(self)
+        mode_frame.pack(fill="x", **pad)
+        ctk.CTkLabel(mode_frame, text="Начин на свързване:").pack(side="left", padx=(0, 8))
+        self.connection_mode = ctk.CTkSegmentedButton(
+            mode_frame,
+            values=["Директно (TikTok)", "TikFinity (Advanced)"],
+            command=self._on_connection_mode_changed,
+        )
+        self.connection_mode.set("Директно (TikTok)")
+        self.connection_mode.pack(side="left", fill="x", expand=True)
+
         top = ctk.CTkFrame(self)
         top.pack(fill="x", **pad)
+        self.direct_username_frame = top
 
         ctk.CTkLabel(top, text="TikTok потребителско име:").pack(side="left", padx=(0, 8))
         self.username_entry = ctk.CTkEntry(top, placeholder_text="напр. someusername (без @)")
@@ -139,6 +155,7 @@ class App(ctk.CTk):
 
         key_frame = ctk.CTkFrame(self)
         key_frame.pack(fill="x", **pad)
+        self.direct_api_key_frame = key_frame
         ctk.CTkLabel(key_frame, text="Euler Stream API ключ (по избор, виж README):").pack(
             side="left", padx=(0, 8)
         )
@@ -146,6 +163,18 @@ class App(ctk.CTk):
             key_frame, placeholder_text="оставяш празно за безплатен общ лимит"
         )
         self.api_key_entry.pack(side="left", fill="x", expand=True)
+
+        tikfinity_frame = ctk.CTkFrame(self)
+        self.tikfinity_frame = tikfinity_frame
+        ctk.CTkLabel(tikfinity_frame, text="TikFinity WebSocket адрес:").pack(side="left", padx=(0, 8))
+        self.tikfinity_url_entry = ctk.CTkEntry(tikfinity_frame)
+        self.tikfinity_url_entry.insert(0, "ws://localhost:21213/")
+        self.tikfinity_url_entry.pack(side="left", fill="x", expand=True)
+        self.tikfinity_note = ctk.CTkLabel(
+            self,
+            text="(Изисква пуснат и свързан TikFinity на компютъра ти)",
+            text_color="gray",
+        )
 
         btns = ctk.CTkFrame(self)
         btns.pack(fill="x", **pad)
@@ -199,6 +228,19 @@ class App(ctk.CTk):
 
     def _log(self, msg: str):
         self.log_queue.put(msg)
+
+    def _on_connection_mode_changed(self, selected_value: str):
+        is_tikfinity = selected_value == "TikFinity (Advanced)"
+        if is_tikfinity:
+            self.direct_username_frame.pack_forget()
+            self.direct_api_key_frame.pack_forget()
+            self.tikfinity_frame.pack(fill="x", padx=14, pady=8)
+            self.tikfinity_note.pack(fill="x", padx=14)
+        else:
+            self.tikfinity_frame.pack_forget()
+            self.tikfinity_note.pack_forget()
+            self.direct_username_frame.pack(fill="x", padx=14, pady=8)
+            self.direct_api_key_frame.pack(fill="x", padx=14, pady=8)
 
     def _poll_log_queue(self):
         try:
@@ -268,20 +310,13 @@ class App(ctk.CTk):
             return True
         return False
 
-    def _is_eligible_heart_me_member(self, user) -> bool:
+    def _is_eligible_heart_me_member(self, user_key: str, is_subscriber: bool) -> bool:
         """Проверява дали потребителят е абонат на канала И поне веднъж
         е пращал подаръка 'Heart Me'."""
         if not self.heart_me_filter_var.get():
             return True
-
-        user_key = getattr(user, "unique_id", None) or str(getattr(user, "user_id", ""))
-        is_subscriber = False
-        try:
-            is_subscriber = user.has_badge("SUBSCRIBER")
-        except Exception:
-            pass
-
-        return is_subscriber and (user_key in self.heart_me_senders)
+        subscriber = bool(is_subscriber) or (user_key in self.confirmed_subscribers)
+        return subscriber and (user_key in self.heart_me_senders)
 
     def _truncate_to_max_chars(self, text: str) -> str:
         raw = self.max_chars_entry.get().strip()
@@ -310,6 +345,36 @@ class App(ctk.CTk):
         except queue.Empty:
             pass
         self.speech_queue.put(text)
+
+    def _process_incoming_comment(self, nickname: str, user_key: str, comment: str, is_subscriber: bool):
+        """Обща логика за входящ коментар — ползва се и от директната връзка,
+        и от TikFinity връзката."""
+        comment = clean_text_for_speech(comment or "")
+        if not comment:
+            return
+
+        self._log(f"{nickname}: {comment}")
+
+        if self._is_filtered(comment):
+            self._log("   -> [филтрирано по забранена дума]")
+            return
+
+        if self._is_spam(user_key, comment):
+            self._log("   -> [филтрирано като спам]")
+            return
+
+        if not self._is_eligible_heart_me_member(user_key, is_subscriber):
+            self._log("   -> [филтрирано: не е Heart Me донор + абонат]")
+            return
+
+        speech_text = self._truncate_to_max_chars(comment)
+        self._enqueue_latest_only(speech_text)
+
+    def _register_heart_me_gift(self, nickname: str, user_key: str, gift_name: str):
+        if (gift_name or "").strip().lower() == HEART_ME_GIFT_NAME and user_key:
+            if user_key not in self.heart_me_senders:
+                self.heart_me_senders.add(user_key)
+                self._log(f"[Система] {nickname} прати Heart Me — вече е допустим.")
 
     # ------------------------------------------------------------------
     # Изговорчик (worker thread)
@@ -344,6 +409,12 @@ class App(ctk.CTk):
             self._log("[Система] Гласът все още не е готов — изчакай малко и опитай пак.")
             return
 
+        if self.connection_mode.get() == "TikFinity (Advanced)":
+            self._start_tikfinity()
+        else:
+            self._start_direct()
+
+    def _start_direct(self):
         username = self.username_entry.get().strip().lstrip("@")
         if not username:
             self._log("[Система] Въведи TikTok потребителско име.")
@@ -372,9 +443,95 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+        if self.tikfinity_loop and self.tikfinity_ws:
+            try:
+                self.tikfinity_loop.call_soon_threadsafe(
+                    functools.partial(asyncio.ensure_future, self.tikfinity_ws.close())
+                )
+            except Exception:
+                pass
+
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.status_label.configure(text="Спряно.", text_color="gray")
+
+    # ------------------------------------------------------------------
+    # TikFinity връзка (Advanced режим)
+    # ------------------------------------------------------------------
+    def _start_tikfinity(self):
+        url = self.tikfinity_url_entry.get().strip()
+        if not url:
+            self._log("[Система] Въведи TikFinity WebSocket адрес.")
+            return
+
+        self.is_running = True
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.status_label.configure(text=f"Свързване към TikFinity ({url}) ...", text_color="orange")
+
+        self.tiktok_thread = threading.Thread(
+            target=self._run_tikfinity_client, args=(url,), daemon=True
+        )
+        self.tiktok_thread.start()
+
+    def _run_tikfinity_client(self, url: str):
+        import json
+        import websockets
+
+        self.tikfinity_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.tikfinity_loop)
+
+        async def listen():
+            async with websockets.connect(url) as ws:
+                self.tikfinity_ws = ws
+                self._log("[Система] Свързан към TikFinity. Изчакваме коментари...")
+                self.status_label.configure(text="На живо (през TikFinity)", text_color="lightgreen")
+
+                async for raw_message in ws:
+                    try:
+                        msg = json.loads(raw_message)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    self._handle_tikfinity_event(msg)
+
+        try:
+            self.tikfinity_loop.run_until_complete(listen())
+        except Exception as e:
+            self._log(f"[Грешка при връзка с TikFinity] {e}")
+            self._log(
+                "[Съвет] Провери дали TikFinity е пуснат и свързан към стрийма, "
+                "и дали адресът съвпада (по подразбиране ws://localhost:21213/)."
+            )
+            traceback.print_exc()
+        finally:
+            self.tikfinity_ws = None
+            self.is_running = False
+            self.start_btn.configure(state="normal")
+            self.stop_btn.configure(state="disabled")
+
+    def _handle_tikfinity_event(self, msg: dict):
+        event_name = msg.get("event")
+        data = msg.get("data") or {}
+
+        if event_name == "chat":
+            nickname = data.get("nickname") or data.get("uniqueId") or "???"
+            user_key = data.get("uniqueId") or str(data.get("userId") or "unknown")
+            comment = data.get("comment") or ""
+            is_subscriber = bool(data.get("isSubscriber", False))
+            self._process_incoming_comment(nickname, user_key, comment, is_subscriber)
+
+        elif event_name == "gift":
+            nickname = data.get("nickname") or data.get("uniqueId") or "???"
+            user_key = data.get("uniqueId") or str(data.get("userId") or "")
+            gift_name = data.get("giftName") or ""
+            self._register_heart_me_gift(nickname, user_key, gift_name)
+
+        elif event_name == "subscribe":
+            user_key = data.get("uniqueId") or str(data.get("userId") or "")
+            if user_key:
+                # Директно потвърждение за абонамент — маркираме го отделно,
+                # за по-сигурно засичане на "абонат" статус.
+                self.confirmed_subscribers.add(user_key)
 
     def _run_tiktok_client(self, username: str):
         self.tiktok_loop = asyncio.new_event_loop()
@@ -395,39 +552,23 @@ class App(ctk.CTk):
                 (getattr(event.user, "unique_id", None) or str(getattr(event.user, "user_id", "")))
                 if event.user else "unknown"
             )
-            comment = clean_text_for_speech(event.comment or "")
-            if not comment:
-                return
+            is_subscriber = False
+            if event.user:
+                try:
+                    is_subscriber = event.user.has_badge("SUBSCRIBER")
+                except Exception:
+                    pass
 
-            self._log(f"{nickname}: {comment}")
-
-            if self._is_filtered(comment):
-                self._log("   -> [филтрирано по забранена дума]")
-                return
-
-            if self._is_spam(user_key, comment):
-                self._log("   -> [филтрирано като спам]")
-                return
-
-            if event.user and not self._is_eligible_heart_me_member(event.user):
-                self._log("   -> [филтрирано: не е Heart Me донор + абонат]")
-                return
-
-            speech_text = self._truncate_to_max_chars(comment)
-            self._enqueue_latest_only(speech_text)
+            self._process_incoming_comment(nickname, user_key, event.comment or "", is_subscriber)
 
         @client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
             if not event.user or not event.gift:
                 return
-            gift_name = (event.gift.name or "").strip().lower()
-            if gift_name == HEART_ME_GIFT_NAME:
-                user_key = getattr(event.user, "unique_id", None) or str(
-                    getattr(event.user, "user_id", "")
-                )
-                if user_key and user_key not in self.heart_me_senders:
-                    self.heart_me_senders.add(user_key)
-                    self._log(f"[Система] {event.user.nickname} прати Heart Me — вече е допустим.")
+            user_key = getattr(event.user, "unique_id", None) or str(
+                getattr(event.user, "user_id", "")
+            )
+            self._register_heart_me_gift(event.user.nickname, user_key, event.gift.name or "")
 
         @client.on(DisconnectEvent)
         async def on_disconnect(_event: DisconnectEvent):
