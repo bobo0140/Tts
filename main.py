@@ -31,7 +31,16 @@ from piper import PiperVoice
 from piper.download_voices import download_voice
 
 from TikTokLive import TikTokLiveClient
-from TikTokLive.events import ConnectEvent, DisconnectEvent, CommentEvent, LiveEndEvent, GiftEvent
+from TikTokLive.events import (
+    ConnectEvent,
+    DisconnectEvent,
+    CommentEvent,
+    LiveEndEvent,
+    GiftEvent,
+    FollowEvent,
+    ShareEvent,
+    RoomUserSeqEvent,
+)
 from TikTokLive.client.web.web_settings import WebDefaults
 
 HEART_ME_GIFT_NAME = "heart me"  # сравнява се без главни/малки букви
@@ -112,6 +121,8 @@ class App(ctk.CTk):
         self.heart_me_senders: set[str] = set()
         # Потребители, за които имаме директно потвърждение за абонамент (през TikFinity "subscribe" събитие)
         self.confirmed_subscribers: set[str] = set()
+        # За хвърляне на "брой зрители" обявявания на интервал, не при всяко събитие
+        self.last_viewer_announcement_time = 0.0
 
         self._build_ui()
 
@@ -145,7 +156,14 @@ class App(ctk.CTk):
         self.connection_mode.set("Директно (TikTok)")
         self.connection_mode.pack(side="left", fill="x", expand=True)
 
-        top = ctk.CTkFrame(self)
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        tab_main = self.tabview.add("Основно")
+        tab_filters = self.tabview.add("Филтри")
+        tab_events = self.tabview.add("Събития")
+
+        # ---------------- Таб "Основно" ----------------
+        top = ctk.CTkFrame(tab_main)
         top.pack(fill="x", **pad)
         self.direct_username_frame = top
 
@@ -153,7 +171,7 @@ class App(ctk.CTk):
         self.username_entry = ctk.CTkEntry(top, placeholder_text="напр. someusername (без @)")
         self.username_entry.pack(side="left", fill="x", expand=True)
 
-        key_frame = ctk.CTkFrame(self)
+        key_frame = ctk.CTkFrame(tab_main)
         key_frame.pack(fill="x", **pad)
         self.direct_api_key_frame = key_frame
         ctk.CTkLabel(key_frame, text="Euler Stream API ключ (по избор, виж README):").pack(
@@ -164,19 +182,19 @@ class App(ctk.CTk):
         )
         self.api_key_entry.pack(side="left", fill="x", expand=True)
 
-        tikfinity_frame = ctk.CTkFrame(self)
+        tikfinity_frame = ctk.CTkFrame(tab_main)
         self.tikfinity_frame = tikfinity_frame
         ctk.CTkLabel(tikfinity_frame, text="TikFinity WebSocket адрес:").pack(side="left", padx=(0, 8))
         self.tikfinity_url_entry = ctk.CTkEntry(tikfinity_frame)
         self.tikfinity_url_entry.insert(0, "ws://localhost:21213/")
         self.tikfinity_url_entry.pack(side="left", fill="x", expand=True)
         self.tikfinity_note = ctk.CTkLabel(
-            self,
+            tab_main,
             text="(Изисква пуснат и свързан TikFinity на компютъра ти)",
             text_color="gray",
         )
 
-        btns = ctk.CTkFrame(self)
+        btns = ctk.CTkFrame(tab_main)
         btns.pack(fill="x", **pad)
 
         self.start_btn = ctk.CTkButton(btns, text="Старт", command=self.start_listening)
@@ -185,10 +203,19 @@ class App(ctk.CTk):
         self.stop_btn = ctk.CTkButton(btns, text="Стоп", command=self.stop_listening, state="disabled")
         self.stop_btn.pack(side="left")
 
-        self.status_label = ctk.CTkLabel(self, text="Подготовка на българския глас...", text_color="orange")
+        self.status_label = ctk.CTkLabel(
+            tab_main, text="Подготовка на българския глас...", text_color="orange"
+        )
         self.status_label.pack(fill="x", padx=14)
 
-        filt = ctk.CTkFrame(self)
+        ctk.CTkLabel(tab_main, text="Лог:").pack(anchor="w", padx=14)
+
+        self.log_box = ctk.CTkTextbox(tab_main, wrap="word")
+        self.log_box.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self.log_box.configure(state="disabled")
+
+        # ---------------- Таб "Филтри" ----------------
+        filt = ctk.CTkFrame(tab_filters)
         filt.pack(fill="x", **pad)
 
         self.filter_var = ctk.BooleanVar(value=False)
@@ -198,7 +225,7 @@ class App(ctk.CTk):
         )
         self.filter_entry.pack(side="left", fill="x", expand=True)
 
-        extra = ctk.CTkFrame(self)
+        extra = ctk.CTkFrame(tab_filters)
         extra.pack(fill="x", **pad)
 
         self.spam_filter_var = ctk.BooleanVar(value=True)
@@ -213,18 +240,49 @@ class App(ctk.CTk):
             variable=self.heart_me_filter_var,
         ).pack(side="left", padx=(0, 16))
 
-        maxlen = ctk.CTkFrame(self)
+        maxlen = ctk.CTkFrame(tab_filters)
         maxlen.pack(fill="x", **pad)
         ctk.CTkLabel(maxlen, text="Макс. брой символи за четене:").pack(side="left", padx=(0, 8))
         self.max_chars_entry = ctk.CTkEntry(maxlen, width=80, placeholder_text="200")
         self.max_chars_entry.insert(0, "200")
         self.max_chars_entry.pack(side="left")
 
-        ctk.CTkLabel(self, text="Лог на коментарите:").pack(anchor="w", padx=14)
+        # ---------------- Таб "Събития" ----------------
+        ctk.CTkLabel(
+            tab_events,
+            text="Допълнителни гласови обявявания (извън коментарите):",
+            text_color="gray",
+        ).pack(anchor="w", padx=14, pady=(8, 0))
 
-        self.log_box = ctk.CTkTextbox(self, wrap="word")
-        self.log_box.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        self.log_box.configure(state="disabled")
+        self.announce_follow_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab_events, text="Обявявай нови последователи", variable=self.announce_follow_var
+        ).pack(anchor="w", padx=14, pady=6)
+
+        self.announce_share_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab_events, text="Обявявай споделяния на стрийма", variable=self.announce_share_var
+        ).pack(anchor="w", padx=14, pady=6)
+
+        gift_frame = ctk.CTkFrame(tab_events)
+        gift_frame.pack(fill="x", padx=14, pady=6)
+        self.announce_gift_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            gift_frame,
+            text="Обявявай подаръци (различни от Heart Me)",
+            variable=self.announce_gift_var,
+        ).pack(side="left")
+
+        viewers_frame = ctk.CTkFrame(tab_events)
+        viewers_frame.pack(fill="x", padx=14, pady=6)
+        self.announce_viewers_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            viewers_frame, text="Обявявай брой зрители на всеки", variable=self.announce_viewers_var
+        ).pack(side="left", padx=(0, 8))
+        self.viewer_interval_entry = ctk.CTkEntry(viewers_frame, width=70)
+        self.viewer_interval_entry.insert(0, "300")
+        self.viewer_interval_entry.pack(side="left")
+        ctk.CTkLabel(viewers_frame, text="секунди").pack(side="left", padx=(6, 0))
 
     def _log(self, msg: str):
         self.log_queue.put(msg)
@@ -376,6 +434,39 @@ class App(ctk.CTk):
                 self.heart_me_senders.add(user_key)
                 self._log(f"[Система] {nickname} прати Heart Me — вече е допустим.")
 
+    def _announce(self, text: str):
+        """Пуска системно съобщение за изговаряне (нов последовател, споделяне и т.н.)."""
+        self._log(f"[Обявяване] {text}")
+        self._enqueue_latest_only(text)
+
+    def _on_follow_event(self, nickname: str):
+        if self.announce_follow_var.get():
+            self._announce(f"{nickname} последва канала!")
+
+    def _on_share_event(self, nickname: str):
+        if self.announce_share_var.get():
+            self._announce(f"{nickname} сподели стрийма!")
+
+    def _on_gift_shoutout(self, nickname: str, gift_name: str):
+        gn = (gift_name or "").strip()
+        if gn.lower() == HEART_ME_GIFT_NAME:
+            return  # Heart Me си има собствена логика, не го обявяваме отделно
+        if self.announce_gift_var.get() and gn:
+            self._announce(f"{nickname} прати подарък {gn}!")
+
+    def _on_viewer_count_event(self, viewer_count):
+        if not self.announce_viewers_var.get() or viewer_count is None:
+            return
+        raw = self.viewer_interval_entry.get().strip()
+        try:
+            interval = int(raw) if raw else 300
+        except ValueError:
+            interval = 300
+        now = time.time()
+        if now - self.last_viewer_announcement_time >= max(interval, 10):
+            self.last_viewer_announcement_time = now
+            self._announce(f"В момента гледат {viewer_count} души.")
+
     # ------------------------------------------------------------------
     # Изговорчик (worker thread)
     # ------------------------------------------------------------------
@@ -525,6 +616,19 @@ class App(ctk.CTk):
             user_key = data.get("uniqueId") or str(data.get("userId") or "")
             gift_name = data.get("giftName") or ""
             self._register_heart_me_gift(nickname, user_key, gift_name)
+            self._on_gift_shoutout(nickname, gift_name)
+
+        elif event_name == "follow":
+            nickname = data.get("nickname") or data.get("uniqueId") or "???"
+            self._on_follow_event(nickname)
+
+        elif event_name == "share":
+            nickname = data.get("nickname") or data.get("uniqueId") or "???"
+            self._on_share_event(nickname)
+
+        elif event_name == "roomUser":
+            viewer_count = data.get("viewerCount")
+            self._on_viewer_count_event(viewer_count)
 
         elif event_name == "subscribe":
             user_key = data.get("uniqueId") or str(data.get("userId") or "")
@@ -568,7 +672,24 @@ class App(ctk.CTk):
             user_key = getattr(event.user, "unique_id", None) or str(
                 getattr(event.user, "user_id", "")
             )
-            self._register_heart_me_gift(event.user.nickname, user_key, event.gift.name or "")
+            gift_name = event.gift.name or ""
+            self._register_heart_me_gift(event.user.nickname, user_key, gift_name)
+            self._on_gift_shoutout(event.user.nickname, gift_name)
+
+        @client.on(FollowEvent)
+        async def on_follow(event: FollowEvent):
+            nickname = event.user.nickname if event.user else "???"
+            self._on_follow_event(nickname)
+
+        @client.on(ShareEvent)
+        async def on_share(event: ShareEvent):
+            nickname = event.user.nickname if event.user else "???"
+            self._on_share_event(nickname)
+
+        @client.on(RoomUserSeqEvent)
+        async def on_room_user_seq(event: RoomUserSeqEvent):
+            viewer_count = getattr(event, "total", None) or getattr(event, "total_user", None)
+            self._on_viewer_count_event(viewer_count)
 
         @client.on(DisconnectEvent)
         async def on_disconnect(_event: DisconnectEvent):
