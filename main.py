@@ -30,6 +30,7 @@ import pygame
 from piper import PiperVoice
 from piper.config import SynthesisConfig
 from piper.download_voices import download_voice
+import edge_tts
 
 from TikTokLive import TikTokLiveClient
 from TikTokLive.events import (
@@ -397,12 +398,26 @@ class App(ctk.CTk):
         # ---------------- Таб "Глас" ----------------
         ctk.CTkLabel(
             tab_voice,
-            text="В момента има само една българска библиотека в Piper (dimitar) — "
-            "тук настройваш КАК звучи тя, не измежду различни гласове.",
+            text="Избери глас — Dimitar е офлайн (Piper), Borislav и Kalina са през "
+            "Microsoft Edge TTS (безплатно, но изисква интернет връзка).",
             text_color="gray",
             wraplength=560,
             justify="left",
         ).pack(anchor="w", padx=14, pady=(8, 12))
+
+        voice_row = ctk.CTkFrame(tab_voice)
+        voice_row.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(voice_row, text="Глас:", width=200, anchor="w").pack(side="left")
+        self.voice_engine_menu = ctk.CTkOptionMenu(
+            voice_row,
+            values=[
+                "Dimitar (Piper, офлайн, мъжки)",
+                "Borislav (Edge TTS, онлайн, мъжки)",
+                "Kalina (Edge TTS, онлайн, женски)",
+            ],
+        )
+        self.voice_engine_menu.set("Dimitar (Piper, офлайн, мъжки)")
+        self.voice_engine_menu.pack(side="left", fill="x", expand=True)
 
         def _make_slider(parent, label_text, frm, to, default, fmt="{:.2f}"):
             row = ctk.CTkFrame(parent)
@@ -418,6 +433,13 @@ class App(ctk.CTk):
             slider.set(default)
             slider.pack(side="left", fill="x", expand=True, padx=10)
             return slider
+
+        ctk.CTkLabel(
+            tab_voice,
+            text="Настройките отдолу важат и за трите гласа "
+            "(за Edge TTS 'изразителност' се пренася като скорост/сила):",
+            text_color="gray",
+        ).pack(anchor="w", padx=14)
 
         ctk.CTkLabel(
             tab_voice, text="По-агресивен / енергичен звук ⟵⟶ по-спокоен, провлачен звук",
@@ -643,38 +665,89 @@ class App(ctk.CTk):
             volume=float(self.volume_slider.get()),
         )
 
+    def _get_selected_voice(self) -> str:
+        """Връща 'piper', 'edge_borislav' или 'edge_kalina' според избора в таб 'Глас'."""
+        selection = self.voice_engine_menu.get()
+        if selection.startswith("Borislav"):
+            return "edge_borislav"
+        if selection.startswith("Kalina"):
+            return "edge_kalina"
+        return "piper"
+
+    def _edge_tts_params(self):
+        """Превръща плъзгачите за скорост/сила в rate/volume параметри за Edge TTS."""
+        length_scale = float(self.speed_slider.get())
+        volume_mult = float(self.volume_slider.get())
+
+        rate_pct = round((1.0 / max(length_scale, 0.1) - 1.0) * 100)
+        rate_pct = max(-80, min(rate_pct, 100))
+
+        vol_pct = round((volume_mult - 1.0) * 100)
+        vol_pct = max(-50, min(vol_pct, 100))
+
+        return f"{rate_pct:+d}%", f"{vol_pct:+d}%"
+
     def _preview_voice(self):
         self.speech_queue.put("Здравей, така ще звуча с тези настройки.")
 
     def _speaker_worker(self):
         while True:
             text = self.speech_queue.get()
-            if self.voice is None:
-                continue
+            selected = self._get_selected_voice()
+
             try:
-                import wave
+                if selected == "piper":
+                    if self.voice is None:
+                        continue
+                    import wave
 
-                syn_config = self._get_synthesis_config()
+                    syn_config = self._get_synthesis_config()
+                    fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+                    os.close(fd)
+                    with wave.open(tmp_path, "wb") as wav_file:
+                        self.voice.synthesize_wav(text, wav_file, syn_config=syn_config)
 
-                fd, tmp_path = tempfile.mkstemp(suffix=".wav")
-                os.close(fd)
-                with wave.open(tmp_path, "wb") as wav_file:
-                    self.voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+                    sound = pygame.mixer.Sound(tmp_path)
+                    channel = sound.play()
+                    while channel.get_busy():
+                        time.sleep(0.05)
+                    os.remove(tmp_path)
 
-                sound = pygame.mixer.Sound(tmp_path)
-                channel = sound.play()
-                while channel.get_busy():
-                    time.sleep(0.05)
+                else:
+                    voice_name = (
+                        "bg-BG-BorislavNeural" if selected == "edge_borislav" else "bg-BG-KalinaNeural"
+                    )
+                    rate, volume = self._edge_tts_params()
 
-                os.remove(tmp_path)
+                    fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
+                    os.close(fd)
+
+                    async def _synthesize():
+                        communicate = edge_tts.Communicate(text, voice_name, rate=rate, volume=volume)
+                        await communicate.save(tmp_path)
+
+                    asyncio.run(_synthesize())
+
+                    pygame.mixer.music.load(tmp_path)
+                    pygame.mixer.music.play()
+                    while pygame.mixer.music.get_busy():
+                        time.sleep(0.05)
+                    pygame.mixer.music.unload()
+                    os.remove(tmp_path)
+
             except Exception as e:
                 self._log(f"[Грешка при изговаряне] {e}")
+                if selected != "piper":
+                    self._log(
+                        "[Съвет] Edge TTS (Borislav/Kalina) изисква интернет връзка. "
+                        "Провери връзката си или превключи на Dimitar (офлайн)."
+                    )
 
     # ------------------------------------------------------------------
     # TikTok Live връзка
     # ------------------------------------------------------------------
     def start_listening(self):
-        if self.voice is None:
+        if self._get_selected_voice() == "piper" and self.voice is None:
             self._log("[Система] Гласът все още не е готов — изчакай малко и опитай пак.")
             return
 

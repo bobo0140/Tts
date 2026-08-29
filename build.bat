@@ -18,6 +18,8 @@ pyinstaller --noconfirm --onefile --windowed --name TikTokTTS ^
     --collect-all customtkinter ^
     --collect-data piper ^
     --collect-submodules piper ^
+    --collect-data certifi ^
+    --collect-all edge_tts ^
     --collect-all TikTokLive ^
     main.py
 
