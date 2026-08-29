@@ -28,6 +28,7 @@ import customtkinter as ctk
 import pygame
 
 from piper import PiperVoice
+from piper.config import SynthesisConfig
 from piper.download_voices import download_voice
 
 from TikTokLive import TikTokLiveClient
@@ -161,6 +162,7 @@ class App(ctk.CTk):
         tab_main = self.tabview.add("Основно")
         tab_filters = self.tabview.add("Филтри")
         tab_events = self.tabview.add("Събития")
+        tab_voice = self.tabview.add("Глас")
 
         # ---------------- Таб "Основно" ----------------
         top = ctk.CTkFrame(tab_main)
@@ -283,6 +285,49 @@ class App(ctk.CTk):
         self.viewer_interval_entry.insert(0, "300")
         self.viewer_interval_entry.pack(side="left")
         ctk.CTkLabel(viewers_frame, text="секунди").pack(side="left", padx=(6, 0))
+
+        # ---------------- Таб "Глас" ----------------
+        ctk.CTkLabel(
+            tab_voice,
+            text="В момента има само една българска библиотека в Piper (dimitar) — "
+            "тук настройваш КАК звучи тя, не измежду различни гласове.",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(8, 12))
+
+        def _make_slider(parent, label_text, frm, to, default, fmt="{:.2f}"):
+            row = ctk.CTkFrame(parent)
+            row.pack(fill="x", padx=14, pady=8)
+            ctk.CTkLabel(row, text=label_text, width=200, anchor="w").pack(side="left")
+            value_label = ctk.CTkLabel(row, text=fmt.format(default), width=50)
+            value_label.pack(side="right")
+
+            def _on_change(v):
+                value_label.configure(text=fmt.format(float(v)))
+
+            slider = ctk.CTkSlider(row, from_=frm, to=to, command=_on_change)
+            slider.set(default)
+            slider.pack(side="left", fill="x", expand=True, padx=10)
+            return slider
+
+        ctk.CTkLabel(
+            tab_voice, text="По-агресивен / енергичен звук ⟵⟶ по-спокоен, провлачен звук",
+            text_color="gray",
+        ).pack(anchor="w", padx=14)
+        self.speed_slider = _make_slider(
+            tab_voice, "Скорост на говор (по-ниско = по-бързо):", 0.6, 1.4, 0.85
+        )
+        self.expressiveness_slider = _make_slider(
+            tab_voice, "Изразителност (повече = по-жив звук):", 0.3, 1.3, 0.9
+        )
+        self.volume_slider = _make_slider(
+            tab_voice, "Сила на звука (може да усилва над 100%):", 0.5, 3.0, 1.3, fmt="{:.1f}x"
+        )
+
+        ctk.CTkButton(
+            tab_voice, text="Пробвай гласа с тези настройки", command=self._preview_voice
+        ).pack(anchor="w", padx=14, pady=(10, 8))
 
     def _log(self, msg: str):
         self.log_queue.put(msg)
@@ -470,6 +515,16 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     # Изговорчик (worker thread)
     # ------------------------------------------------------------------
+    def _get_synthesis_config(self) -> SynthesisConfig:
+        return SynthesisConfig(
+            length_scale=float(self.speed_slider.get()),
+            noise_scale=float(self.expressiveness_slider.get()),
+            volume=float(self.volume_slider.get()),
+        )
+
+    def _preview_voice(self):
+        self.speech_queue.put("Здравей, така ще звуча с тези настройки.")
+
     def _speaker_worker(self):
         while True:
             text = self.speech_queue.get()
@@ -478,10 +533,12 @@ class App(ctk.CTk):
             try:
                 import wave
 
+                syn_config = self._get_synthesis_config()
+
                 fd, tmp_path = tempfile.mkstemp(suffix=".wav")
                 os.close(fd)
                 with wave.open(tmp_path, "wb") as wav_file:
-                    self.voice.synthesize_wav(text, wav_file)
+                    self.voice.synthesize_wav(text, wav_file, syn_config=syn_config)
 
                 sound = pygame.mixer.Sound(tmp_path)
                 channel = sound.play()
