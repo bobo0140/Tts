@@ -48,6 +48,35 @@ from TikTokLive.client.web.web_settings import WebDefaults
 
 HEART_ME_GIFT_NAME = "heart me"  # сравнява се без главни/малки букви
 
+# Централен регистър на гласовете: key -> (кратко име за показване, engine, edge voice id или None)
+VOICE_REGISTRY = {
+    "piper": {"short": "Dimitar", "label": "Dimitar (Piper, офлайн, мъжки)", "engine": "piper"},
+    "edge_borislav": {
+        "short": "Borislav", "label": "Borislav (Edge TTS, онлайн, мъжки)",
+        "engine": "edge", "edge_voice": "bg-BG-BorislavNeural",
+    },
+    "edge_kalina": {
+        "short": "Kalina", "label": "Kalina (Edge TTS, онлайн, женски)",
+        "engine": "edge", "edge_voice": "bg-BG-KalinaNeural",
+    },
+    "edge_andrew": {
+        "short": "Andrew", "label": "Andrew (Edge TTS, експериментален, мъжки)",
+        "engine": "edge", "edge_voice": "en-US-AndrewMultilingualNeural",
+    },
+    "edge_ava": {
+        "short": "Ava", "label": "Ava (Edge TTS, експериментален, женски)",
+        "engine": "edge", "edge_voice": "en-US-AvaMultilingualNeural",
+    },
+    "edge_vivienne": {
+        "short": "Vivienne", "label": "Vivienne (Edge TTS, експериментален, женски)",
+        "engine": "edge", "edge_voice": "fr-FR-VivienneMultilingualNeural",
+    },
+    "edge_seraphina": {
+        "short": "Seraphina", "label": "Seraphina (Edge TTS, експериментален, женски)",
+        "engine": "edge", "edge_voice": "de-DE-SeraphinaMultilingualNeural",
+    },
+}
+
 # Анти-спам настройки
 SPAM_WINDOW_SECONDS = 12          # прозорец за проверка
 SPAM_SAME_USER_MAX = 3            # макс. коментари от 1 човек в прозореца
@@ -399,8 +428,10 @@ class App(ctk.CTk):
         # ---------------- Таб "Глас" ----------------
         ctk.CTkLabel(
             tab_voice,
-            text="Избери глас — Dimitar е офлайн (Piper), Borislav и Kalina са през "
-            "Microsoft Edge TTS (безплатно, но изисква интернет връзка).",
+            text="Избери глас — Dimitar е офлайн (Piper), останалите са през Microsoft Edge TTS "
+            "(безплатно, изисква интернет). Гласовете, различни от Borislav/Kalina, не са "
+            "правени специално за български и са отбелязани като 'експериментален' — пробвай ги "
+            "и прецени сам как звучат.",
             text_color="gray",
             wraplength=560,
             justify="left",
@@ -410,14 +441,9 @@ class App(ctk.CTk):
         voice_row.pack(fill="x", padx=14, pady=(0, 12))
         ctk.CTkLabel(voice_row, text="Глас:", width=200, anchor="w").pack(side="left")
         self.voice_engine_menu = ctk.CTkOptionMenu(
-            voice_row,
-            values=[
-                "Dimitar (Piper, офлайн, мъжки)",
-                "Borislav (Edge TTS, онлайн, мъжки)",
-                "Kalina (Edge TTS, онлайн, женски)",
-            ],
+            voice_row, values=[v["label"] for v in VOICE_REGISTRY.values()]
         )
-        self.voice_engine_menu.set("Dimitar (Piper, офлайн, мъжки)")
+        self.voice_engine_menu.set(VOICE_REGISTRY["piper"]["label"])
         self.voice_engine_menu.pack(side="left", fill="x", expand=True)
 
         self.voice_shuffle_var = ctk.BooleanVar(value=False)
@@ -429,23 +455,31 @@ class App(ctk.CTk):
             variable=self.voice_shuffle_var,
         ).pack(side="left")
 
-        shuffle_pool_row = ctk.CTkFrame(tab_voice)
-        shuffle_pool_row.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(shuffle_pool_row, text="Включени в разбъркването:", text_color="gray").pack(
-            side="left", padx=(20, 8)
+        shuffle_pool_frame = ctk.CTkFrame(tab_voice)
+        shuffle_pool_frame.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(shuffle_pool_frame, text="Включени в разбъркването:", text_color="gray").pack(
+            anchor="w", padx=(20, 0), pady=(4, 2)
         )
-        self.shuffle_dimitar_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(shuffle_pool_row, text="Dimitar", variable=self.shuffle_dimitar_var).pack(
-            side="left", padx=(0, 10)
-        )
-        self.shuffle_borislav_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(shuffle_pool_row, text="Borislav", variable=self.shuffle_borislav_var).pack(
-            side="left", padx=(0, 10)
-        )
-        self.shuffle_kalina_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(shuffle_pool_row, text="Kalina", variable=self.shuffle_kalina_var).pack(
-            side="left"
-        )
+        pool_row1 = ctk.CTkFrame(shuffle_pool_frame)
+        pool_row1.pack(fill="x", padx=(20, 0))
+        pool_row2 = ctk.CTkFrame(shuffle_pool_frame)
+        pool_row2.pack(fill="x", padx=(20, 0), pady=(4, 0))
+
+        self.shuffle_vars: dict[str, ctk.BooleanVar] = {}
+        core_voices = ["piper", "edge_borislav", "edge_kalina"]
+        experimental_voices = ["edge_andrew", "edge_ava", "edge_vivienne", "edge_seraphina"]
+        for key in core_voices:
+            var = ctk.BooleanVar(value=True)  # основните гласове - включени по подразбиране
+            self.shuffle_vars[key] = var
+            ctk.CTkCheckBox(pool_row1, text=VOICE_REGISTRY[key]["short"], variable=var).pack(
+                side="left", padx=(0, 10)
+            )
+        for key in experimental_voices:
+            var = ctk.BooleanVar(value=False)  # експерименталните - изключени по подразбиране
+            self.shuffle_vars[key] = var
+            ctk.CTkCheckBox(pool_row2, text=VOICE_REGISTRY[key]["short"], variable=var).pack(
+                side="left", padx=(0, 10)
+            )
 
         def _make_slider(parent, label_text, frm, to, default, fmt="{:.2f}"):
             row = ctk.CTkFrame(parent)
@@ -694,26 +728,19 @@ class App(ctk.CTk):
         )
 
     def _get_selected_voice(self) -> str:
-        """Връща 'piper', 'edge_borislav' или 'edge_kalina'.
+        """Връща ключ от VOICE_REGISTRY.
         Ако разбъркването е включено, избира произволно измежду включените
         в пула гласове при всяко извикване (т.е. за всеки нов коментар)."""
         if self.voice_shuffle_var.get():
-            pool = []
-            if self.shuffle_dimitar_var.get():
-                pool.append("piper")
-            if self.shuffle_borislav_var.get():
-                pool.append("edge_borislav")
-            if self.shuffle_kalina_var.get():
-                pool.append("edge_kalina")
+            pool = [key for key, var in self.shuffle_vars.items() if var.get()]
             if pool:
                 return random.choice(pool)
             # ако нищо не е отметнато в пула, падаме обратно на падащото меню
 
-        selection = self.voice_engine_menu.get()
-        if selection.startswith("Borislav"):
-            return "edge_borislav"
-        if selection.startswith("Kalina"):
-            return "edge_kalina"
+        label = self.voice_engine_menu.get()
+        for key, info in VOICE_REGISTRY.items():
+            if info["label"] == label:
+                return key
         return "piper"
 
     def _edge_tts_params(self):
@@ -756,9 +783,7 @@ class App(ctk.CTk):
                     os.remove(tmp_path)
 
                 else:
-                    voice_name = (
-                        "bg-BG-BorislavNeural" if selected == "edge_borislav" else "bg-BG-KalinaNeural"
-                    )
+                    voice_name = VOICE_REGISTRY[selected]["edge_voice"]
                     rate, volume = self._edge_tts_params()
 
                     fd, tmp_path = tempfile.mkstemp(suffix=".mp3")
@@ -790,8 +815,8 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     def _piper_possibly_used(self) -> bool:
         if self.voice_shuffle_var.get():
-            return self.shuffle_dimitar_var.get()
-        return self.voice_engine_menu.get().startswith("Dimitar")
+            return self.shuffle_vars["piper"].get()
+        return self.voice_engine_menu.get() == VOICE_REGISTRY["piper"]["label"]
 
     def start_listening(self):
         if self._piper_possibly_used() and self.voice is None:
