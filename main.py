@@ -59,22 +59,6 @@ VOICE_REGISTRY = {
         "short": "Kalina", "label": "Kalina (Edge TTS, онлайн, женски)",
         "engine": "edge", "edge_voice": "bg-BG-KalinaNeural",
     },
-    "edge_andrew": {
-        "short": "Andrew", "label": "Andrew (Edge TTS, експериментален, мъжки)",
-        "engine": "edge", "edge_voice": "en-US-AndrewMultilingualNeural",
-    },
-    "edge_ava": {
-        "short": "Ava", "label": "Ava (Edge TTS, експериментален, женски)",
-        "engine": "edge", "edge_voice": "en-US-AvaMultilingualNeural",
-    },
-    "edge_vivienne": {
-        "short": "Vivienne", "label": "Vivienne (Edge TTS, експериментален, женски)",
-        "engine": "edge", "edge_voice": "fr-FR-VivienneMultilingualNeural",
-    },
-    "edge_seraphina": {
-        "short": "Seraphina", "label": "Seraphina (Edge TTS, експериментален, женски)",
-        "engine": "edge", "edge_voice": "de-DE-SeraphinaMultilingualNeural",
-    },
 }
 
 # Анти-спам настройки
@@ -428,10 +412,8 @@ class App(ctk.CTk):
         # ---------------- Таб "Глас" ----------------
         ctk.CTkLabel(
             tab_voice,
-            text="Избери глас — Dimitar е офлайн (Piper), останалите са през Microsoft Edge TTS "
-            "(безплатно, изисква интернет). Гласовете, различни от Borislav/Kalina, не са "
-            "правени специално за български и са отбелязани като 'експериментален' — пробвай ги "
-            "и прецени сам как звучат.",
+            text="Избери глас — Dimitar е офлайн (Piper), Borislav и Kalina са през "
+            "Microsoft Edge TTS (безплатно, изисква интернет).",
             text_color="gray",
             wraplength=560,
             justify="left",
@@ -462,22 +444,12 @@ class App(ctk.CTk):
         )
         pool_row1 = ctk.CTkFrame(shuffle_pool_frame)
         pool_row1.pack(fill="x", padx=(20, 0))
-        pool_row2 = ctk.CTkFrame(shuffle_pool_frame)
-        pool_row2.pack(fill="x", padx=(20, 0), pady=(4, 0))
 
         self.shuffle_vars: dict[str, ctk.BooleanVar] = {}
-        core_voices = ["piper", "edge_borislav", "edge_kalina"]
-        experimental_voices = ["edge_andrew", "edge_ava", "edge_vivienne", "edge_seraphina"]
-        for key in core_voices:
-            var = ctk.BooleanVar(value=True)  # основните гласове - включени по подразбиране
+        for key in VOICE_REGISTRY:
+            var = ctk.BooleanVar(value=True)
             self.shuffle_vars[key] = var
             ctk.CTkCheckBox(pool_row1, text=VOICE_REGISTRY[key]["short"], variable=var).pack(
-                side="left", padx=(0, 10)
-            )
-        for key in experimental_voices:
-            var = ctk.BooleanVar(value=False)  # експерименталните - изключени по подразбиране
-            self.shuffle_vars[key] = var
-            ctk.CTkCheckBox(pool_row2, text=VOICE_REGISTRY[key]["short"], variable=var).pack(
                 side="left", padx=(0, 10)
             )
 
