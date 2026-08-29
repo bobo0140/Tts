@@ -15,6 +15,7 @@ import asyncio
 import functools
 import os
 import queue
+import random
 import re
 import sys
 import tempfile
@@ -419,6 +420,33 @@ class App(ctk.CTk):
         self.voice_engine_menu.set("Dimitar (Piper, офлайн, мъжки)")
         self.voice_engine_menu.pack(side="left", fill="x", expand=True)
 
+        self.voice_shuffle_var = ctk.BooleanVar(value=False)
+        shuffle_row = ctk.CTkFrame(tab_voice)
+        shuffle_row.pack(fill="x", padx=14, pady=(0, 4))
+        ctk.CTkCheckBox(
+            shuffle_row,
+            text="Разбъркай гласовете (произволен глас за всеки коментар)",
+            variable=self.voice_shuffle_var,
+        ).pack(side="left")
+
+        shuffle_pool_row = ctk.CTkFrame(tab_voice)
+        shuffle_pool_row.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(shuffle_pool_row, text="Включени в разбъркването:", text_color="gray").pack(
+            side="left", padx=(20, 8)
+        )
+        self.shuffle_dimitar_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(shuffle_pool_row, text="Dimitar", variable=self.shuffle_dimitar_var).pack(
+            side="left", padx=(0, 10)
+        )
+        self.shuffle_borislav_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(shuffle_pool_row, text="Borislav", variable=self.shuffle_borislav_var).pack(
+            side="left", padx=(0, 10)
+        )
+        self.shuffle_kalina_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(shuffle_pool_row, text="Kalina", variable=self.shuffle_kalina_var).pack(
+            side="left"
+        )
+
         def _make_slider(parent, label_text, frm, to, default, fmt="{:.2f}"):
             row = ctk.CTkFrame(parent)
             row.pack(fill="x", padx=14, pady=8)
@@ -666,7 +694,21 @@ class App(ctk.CTk):
         )
 
     def _get_selected_voice(self) -> str:
-        """Връща 'piper', 'edge_borislav' или 'edge_kalina' според избора в таб 'Глас'."""
+        """Връща 'piper', 'edge_borislav' или 'edge_kalina'.
+        Ако разбъркването е включено, избира произволно измежду включените
+        в пула гласове при всяко извикване (т.е. за всеки нов коментар)."""
+        if self.voice_shuffle_var.get():
+            pool = []
+            if self.shuffle_dimitar_var.get():
+                pool.append("piper")
+            if self.shuffle_borislav_var.get():
+                pool.append("edge_borislav")
+            if self.shuffle_kalina_var.get():
+                pool.append("edge_kalina")
+            if pool:
+                return random.choice(pool)
+            # ако нищо не е отметнато в пула, падаме обратно на падащото меню
+
         selection = self.voice_engine_menu.get()
         if selection.startswith("Borislav"):
             return "edge_borislav"
@@ -746,8 +788,13 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     # TikTok Live връзка
     # ------------------------------------------------------------------
+    def _piper_possibly_used(self) -> bool:
+        if self.voice_shuffle_var.get():
+            return self.shuffle_dimitar_var.get()
+        return self.voice_engine_menu.get().startswith("Dimitar")
+
     def start_listening(self):
-        if self._get_selected_voice() == "piper" and self.voice is None:
+        if self._piper_possibly_used() and self.voice is None:
             self._log("[Система] Гласът все още не е готов — изчакай малко и опитай пак.")
             return
 
