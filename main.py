@@ -89,6 +89,99 @@ def clean_text_for_speech(text: str) -> str:
     return text
 
 
+MENTION_PATTERN = re.compile(r"@[\w.]+", re.UNICODE)
+
+
+def strip_mentions(text: str) -> str:
+    text = MENTION_PATTERN.sub("", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# --------------------------------------------------------------------------
+# "Шльокавица" -> кирилица (евристична транслитерация)
+# --------------------------------------------------------------------------
+# Няма перфектен алгоритъм за това (шльокавицата не е стандартизирана), но
+# покриваме най-честите случаи: букви + цифрите 4 ("ч") и 6 ("ш"), които са
+# емблематични точно за шльокавицата.
+
+# По-дълги последователности се проверяват първи (най-дългият печели).
+_SHL_MULTI = [
+    ("sht", "щ"), ("6t", "щ"),
+    ("sh", "ш"), ("ch", "ч"), ("zh", "ж"),
+    ("yu", "ю"), ("ya", "я"), ("yo", "йо"), ("jo", "йо"),
+]
+_SHL_SINGLE = {
+    "a": "а", "b": "б", "v": "в", "g": "г", "d": "д", "e": "е",
+    "z": "з", "i": "и", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "r": "р", "s": "с", "t": "т", "u": "у",
+    "f": "ф", "h": "х", "c": "ц", "j": "ж", "y": "ъ", "w": "ъ",
+    "q": "я", "x": "х",
+    "4": "ч", "6": "ш",
+}
+
+# Кратки латински думи/съкращения, които НЕ искаме да превеждаме
+_SHL_WHITELIST = {
+    "lol", "gg", "wp", "ok", "okay", "hi", "hey", "bye", "yes", "no",
+    "wow", "nice", "cool", "omg", "wtf", "lmao", "xd", "haha", "hahaha",
+    "hahahaha", "pog", "poggers", "love", "tiktok", "youtube", "instagram",
+    "facebook", "live", "stream", "pro", "top", "fail", "win",
+}
+
+
+def _convert_shlyokavitsa_word(word: str) -> str:
+    lower = word.lower()
+    if lower in _SHL_WHITELIST:
+        return word
+    if lower.isupper() and len(word) <= 4:
+        return word  # вероятно съкращение (BG, EU, USA...)
+
+    result = []
+    i = 0
+    n = len(lower)
+    vowels_for_semivowel = {"а", "е", "о", "у", "ъ"}
+    while i < n:
+        matched = False
+        for seq, repl in _SHL_MULTI:
+            if lower.startswith(seq, i):
+                result.append(repl)
+                i += len(seq)
+                matched = True
+                break
+        if matched:
+            continue
+        ch = lower[i]
+        if ch == "i" and result and result[-1] in vowels_for_semivowel:
+            # "ei"/"ai"/"oi"/"ui" в края или средата обикновено значи "й", не "и"
+            # (напр. "zdravei" -> "здравей", "moi" -> "мой")
+            result.append("й")
+        else:
+            result.append(_SHL_SINGLE.get(ch, ch))
+        i += 1
+
+    converted = "".join(result)
+    if word[:1].isupper():
+        converted = converted[:1].upper() + converted[1:]
+    return converted
+
+
+_WORD_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+|[^A-Za-z0-9]+", re.UNICODE)
+_HAS_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+_LATIN_OR_DIGIT_ONLY = re.compile(r"^[A-Za-z0-9]+$")
+_PURE_DIGITS = re.compile(r"^[0-9]+$")
+
+
+def transliterate_shlyokavitsa(text: str) -> str:
+    """Преобразува думи, писани на 'шльокавица' (латиница/цифри), в кирилица.
+    Пропуска думи, които вече съдържат кирилски букви, или са чисто числа."""
+    out = []
+    for token in _WORD_TOKEN_PATTERN.findall(text):
+        if _LATIN_OR_DIGIT_ONLY.match(token) and not _PURE_DIGITS.match(token) and not _HAS_CYRILLIC.search(token):
+            out.append(_convert_shlyokavitsa_word(token))
+        else:
+            out.append(token)
+    return "".join(out)
+
+
 # --------------------------------------------------------------------------
 # Приложение
 # --------------------------------------------------------------------------
@@ -240,6 +333,21 @@ class App(ctk.CTk):
             extra,
             text="Само от Heart Me донори + абонати на канала",
             variable=self.heart_me_filter_var,
+        ).pack(side="left", padx=(0, 16))
+
+        extra2 = ctk.CTkFrame(tab_filters)
+        extra2.pack(fill="x", **pad)
+
+        self.strip_mentions_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            extra2, text="Пропускай @споменавания (напр. @ivan123)", variable=self.strip_mentions_var
+        ).pack(side="left", padx=(0, 16))
+
+        self.shlyokavitsa_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            extra2,
+            text="Конвертирай 'шльокавица' (Zdravei → Здравей) в кирилица",
+            variable=self.shlyokavitsa_var,
         ).pack(side="left", padx=(0, 16))
 
         maxlen = ctk.CTkFrame(tab_filters)
@@ -456,7 +564,20 @@ class App(ctk.CTk):
         if not comment:
             return
 
-        self._log(f"{nickname}: {comment}")
+        if self.strip_mentions_var.get():
+            comment = strip_mentions(comment)
+            if not comment:
+                return
+
+        if self.shlyokavitsa_var.get():
+            converted = transliterate_shlyokavitsa(comment)
+            if converted != comment:
+                self._log(f"{nickname}: {comment}  ->  {converted}")
+            else:
+                self._log(f"{nickname}: {comment}")
+            comment = converted
+        else:
+            self._log(f"{nickname}: {comment}")
 
         if self._is_filtered(comment):
             self._log("   -> [филтрирано по забранена дума]")
