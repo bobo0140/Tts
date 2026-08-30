@@ -155,7 +155,6 @@ def _convert_shlyokavitsa_word(word: str) -> str:
     result = []
     i = 0
     n = len(lower)
-    vowels_for_semivowel = {"а", "е", "о", "у", "ъ"}
     while i < n:
         matched = False
         for seq, repl in _SHL_MULTI:
@@ -167,12 +166,7 @@ def _convert_shlyokavitsa_word(word: str) -> str:
         if matched:
             continue
         ch = lower[i]
-        if ch == "i" and result and result[-1] in vowels_for_semivowel:
-            # "ei"/"ai"/"oi"/"ui" в края или средата обикновено значи "й", не "и"
-            # (напр. "zdravei" -> "здравей", "moi" -> "мой")
-            result.append("й")
-        else:
-            result.append(_SHL_SINGLE.get(ch, ch))
+        result.append(_SHL_SINGLE.get(ch, ch))
         i += 1
 
     converted = "".join(result)
