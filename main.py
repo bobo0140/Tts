@@ -332,6 +332,8 @@ class App(ctk.CTk):
         self.confirmed_subscribers: set[str] = set()
         # За хвърляне на "брой зрители" обявявания на интервал, не при всяко събитие
         self.last_viewer_announcement_time = 0.0
+        # Потребители, чието споделяне вече е било обявено (за да не спамим при 2+ споделяния)
+        self.announced_sharers: set[str] = set()
 
         self._build_ui()
 
@@ -823,9 +825,16 @@ class App(ctk.CTk):
         if self.announce_follow_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
             self._announce(f"{nickname} последва канала!")
 
-    def _on_share_event(self, nickname: str):
-        if self.announce_share_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
-            self._announce(f"{nickname} сподели стрийма!")
+    def _on_share_event(self, nickname: str, user_key: str = ""):
+        if not self.announce_share_var.get():
+            return
+        if user_key and user_key in self.announced_sharers:
+            return  # вече му обявихме споделянето веднъж - не спамим повторно
+        if not is_reasonable_name(nickname, self._get_max_name_len()):
+            return
+        if user_key:
+            self.announced_sharers.add(user_key)
+        self._announce(f"{nickname} сподели стрийма!")
 
     def _on_gift_shoutout(self, nickname: str, gift_name: str):
         gn = (gift_name or "").strip()
@@ -1084,7 +1093,8 @@ class App(ctk.CTk):
 
         elif event_name == "share":
             nickname = data.get("nickname") or data.get("uniqueId") or "???"
-            self._on_share_event(nickname)
+            user_key = data.get("uniqueId") or str(data.get("userId") or "")
+            self._on_share_event(nickname, user_key)
 
         elif event_name == "roomUser":
             viewer_count = data.get("viewerCount")
@@ -1144,7 +1154,11 @@ class App(ctk.CTk):
         @client.on(ShareEvent)
         async def on_share(event: ShareEvent):
             nickname = event.user.nickname if event.user else "???"
-            self._on_share_event(nickname)
+            user_key = (
+                getattr(event.user, "unique_id", None) or str(getattr(event.user, "user_id", ""))
+                if event.user else "unknown"
+            )
+            self._on_share_event(nickname, user_key)
 
         @client.on(RoomUserSeqEvent)
         async def on_room_user_seq(event: RoomUserSeqEvent):
