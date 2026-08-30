@@ -22,9 +22,11 @@ import tempfile
 import threading
 import time
 import traceback
+import wave
 from collections import deque
 from pathlib import Path
 
+import numpy as np
 import customtkinter as ctk
 import pygame
 
@@ -195,6 +197,110 @@ def transliterate_shlyokavitsa(text: str) -> str:
         else:
             out.append(token)
     return "".join(out)
+
+
+# --------------------------------------------------------------------------
+# Гласови ефекти (работят само върху суров PCM WAV, т.е. Piper изхода)
+# --------------------------------------------------------------------------
+
+def _read_wav_as_array(path: str):
+    with wave.open(path, "rb") as wf:
+        n_channels = wf.getnchannels()
+        sampwidth = wf.getsampwidth()
+        framerate = wf.getframerate()
+        n_frames = wf.getnframes()
+        raw = wf.readframes(n_frames)
+    dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sampwidth, np.int16)
+    samples = np.frombuffer(raw, dtype=dtype).astype(np.float32)
+    if n_channels > 1:
+        samples = samples.reshape(-1, n_channels)
+    return samples, framerate, n_channels, sampwidth
+
+
+def _write_wav_from_array(path: str, samples, framerate: int, n_channels: int, sampwidth: int):
+    dtype = {1: np.int8, 2: np.int16, 4: np.int32}.get(sampwidth, np.int16)
+    max_val = float(2 ** (8 * sampwidth - 1) - 1)
+    samples = np.clip(samples, -max_val, max_val).astype(dtype)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(n_channels)
+        wf.setsampwidth(sampwidth)
+        wf.setframerate(framerate)
+        wf.writeframes(samples.tobytes())
+
+
+def apply_voice_effect(wav_path: str, effect: str):
+    """Прилага прост звуков ефект директно върху WAV файла (in-place)."""
+    if effect == "Няма":
+        return
+
+    samples, framerate, n_channels, sampwidth = _read_wav_as_array(wav_path)
+
+    if effect in ("Дълбок глас", "Чипмънк"):
+        # Трик с честотата на семплиране: не пипаме данните, само декларираме
+        # различна честота при запис -> плейърът го изпълнява по-бавно/дълбоко
+        # или по-бързо/писклИво.
+        factor = 0.78 if effect == "Дълбок глас" else 1.35
+        new_rate = max(4000, int(framerate * factor))
+        _write_wav_from_array(wav_path, samples, new_rate, n_channels, sampwidth)
+        return
+
+    if effect == "Ехо":
+        delay_ms, decay, repeats = 220, 0.45, 3
+        delay_samples = int(framerate * delay_ms / 1000)
+        out = samples.copy()
+        for i in range(1, repeats + 1):
+            shift = delay_samples * i
+            if shift >= len(samples):
+                break
+            echo = np.zeros_like(samples)
+            echo[shift:] = samples[: len(samples) - shift] * (decay ** i)
+            out += echo
+        _write_wav_from_array(wav_path, out, framerate, n_channels, sampwidth)
+        return
+
+    if effect == "Реверберация":
+        # Няколко близки, тихи повторения -> усещане за "стая", вместо ясно ехо
+        out = samples.copy()
+        for delay_ms, decay in ((15, 0.35), (35, 0.25), (60, 0.18), (95, 0.12)):
+            shift = int(framerate * delay_ms / 1000)
+            if shift >= len(samples):
+                continue
+            tap = np.zeros_like(samples)
+            tap[shift:] = samples[: len(samples) - shift] * decay
+            out += tap
+        _write_wav_from_array(wav_path, out, framerate, n_channels, sampwidth)
+        return
+
+    if effect == "Робот":
+        n = len(samples)
+        t = np.arange(n, dtype=np.float32) / framerate
+        carrier = np.sin(2 * np.pi * 45.0 * t)
+        if n_channels > 1:
+            carrier = carrier[:, None]
+        modulated = samples * carrier
+        # смес от оригинала и модулирания сигнал, за да остане разбираемо
+        out = 0.5 * samples + 0.5 * modulated
+        _write_wav_from_array(wav_path, out, framerate, n_channels, sampwidth)
+        return
+
+
+_NAME_LETTER_PATTERN = re.compile(r"[^\W\d_]", re.UNICODE)  # букви от всякаква азбука
+
+
+def is_reasonable_name(name: str, max_len: int = 20) -> bool:
+    """Груба проверка дали едно потребителско име е разумно за произнасяне на
+    глас — не твърде дълго и не съставено предимно от символи/емоджита/цифри."""
+    if not name:
+        return False
+    cleaned = clean_text_for_speech(name).strip()
+    if not cleaned:
+        return False
+    if len(cleaned) > max_len:
+        return False
+    letters = len(_NAME_LETTER_PATTERN.findall(cleaned))
+    if letters == 0 or letters < len(cleaned) * 0.5:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -370,7 +476,13 @@ class App(ctk.CTk):
         ctk.CTkLabel(maxlen, text="Макс. брой символи за четене:").pack(side="left", padx=(0, 8))
         self.max_chars_entry = ctk.CTkEntry(maxlen, width=80, placeholder_text="200")
         self.max_chars_entry.insert(0, "200")
-        self.max_chars_entry.pack(side="left")
+        self.max_chars_entry.pack(side="left", padx=(0, 16))
+        self.skip_instead_of_truncate_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            maxlen,
+            text="Пропускай изцяло по-дългите (вместо да ги съкращава)",
+            variable=self.skip_instead_of_truncate_var,
+        ).pack(side="left")
 
         # ---------------- Таб "Събития" ----------------
         ctk.CTkLabel(
@@ -408,6 +520,19 @@ class App(ctk.CTk):
         self.viewer_interval_entry.insert(0, "300")
         self.viewer_interval_entry.pack(side="left")
         ctk.CTkLabel(viewers_frame, text="секунди").pack(side="left", padx=(6, 0))
+
+        name_len_frame = ctk.CTkFrame(tab_events)
+        name_len_frame.pack(fill="x", padx=14, pady=(10, 6))
+        ctk.CTkLabel(
+            name_len_frame, text="Пропускай странни/твърде дълги имена в обявяванията по-горе:",
+            text_color="gray",
+        ).pack(anchor="w")
+        name_len_row = ctk.CTkFrame(name_len_frame)
+        name_len_row.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(name_len_row, text="Макс. дължина на име:").pack(side="left", padx=(0, 8))
+        self.max_name_len_entry = ctk.CTkEntry(name_len_row, width=70)
+        self.max_name_len_entry.insert(0, "20")
+        self.max_name_len_entry.pack(side="left")
 
         # ---------------- Таб "Глас" ----------------
         ctk.CTkLabel(
@@ -486,8 +611,29 @@ class App(ctk.CTk):
             tab_voice, "Изразителност (повече = по-жив звук):", 0.3, 1.3, 0.9
         )
         self.volume_slider = _make_slider(
-            tab_voice, "Сила на звука (може да усилва над 100%):", 0.5, 3.0, 1.3, fmt="{:.1f}x"
+            tab_voice, "Сила на звука (0.05 = почти тихо, 3.0 = силно усилване):",
+            0.05, 3.0, 1.3, fmt="{:.2f}x"
         )
+
+        # ---------------- Гласови ефекти (само за Dimitar/Piper) ----------------
+        ctk.CTkLabel(
+            tab_voice,
+            text="Гласови ефекти — работят само за Dimitar (Piper), защото Borislav/Kalina "
+            "идват компресирани от облака и не могат да се обработват допълнително:",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(16, 4))
+
+        effect_row = ctk.CTkFrame(tab_voice)
+        effect_row.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(effect_row, text="Ефект:", width=200, anchor="w").pack(side="left")
+        self.voice_effect_menu = ctk.CTkOptionMenu(
+            effect_row,
+            values=["Няма", "Дълбок глас", "Чипмънк", "Ехо", "Робот", "Реверберация"],
+        )
+        self.voice_effect_menu.set("Няма")
+        self.voice_effect_menu.pack(side="left", fill="x", expand=True)
 
         ctk.CTkButton(
             tab_voice, text="Пробвай гласа с тези настройки", command=self._preview_voice
@@ -585,14 +731,23 @@ class App(ctk.CTk):
         subscriber = bool(is_subscriber) or (user_key in self.confirmed_subscribers)
         return subscriber and (user_key in self.heart_me_senders)
 
-    def _truncate_to_max_chars(self, text: str) -> str:
+    def _apply_max_chars(self, text: str):
+        """Връща обработения текст, или None ако коментарът трябва да се
+        пропусне изцяло (когато е избрано 'пропускай' и текстът е по-дълъг
+        от лимита)."""
         raw = self.max_chars_entry.get().strip()
         try:
             max_chars = int(raw) if raw else 200
         except ValueError:
             max_chars = 200
+
         if max_chars <= 0 or len(text) <= max_chars:
             return text
+
+        if self.skip_instead_of_truncate_var.get():
+            self._log(f"   -> [пропуснато: {len(text)} символа > лимит {max_chars}]")
+            return None
+
         # режем на границата на дума, ако е възможно, за да не се получи
         # накъсана дума по средата
         cut = text[:max_chars]
@@ -647,7 +802,9 @@ class App(ctk.CTk):
             self._log("   -> [филтрирано: не е Heart Me донор + абонат]")
             return
 
-        speech_text = self._truncate_to_max_chars(comment)
+        speech_text = self._apply_max_chars(comment)
+        if speech_text is None:
+            return
         self._enqueue_latest_only(speech_text)
 
     def _register_heart_me_gift(self, nickname: str, user_key: str, gift_name: str):
@@ -661,19 +818,30 @@ class App(ctk.CTk):
         self._log(f"[Обявяване] {text}")
         self._enqueue_latest_only(text)
 
+    def _get_max_name_len(self) -> int:
+        raw = self.max_name_len_entry.get().strip()
+        try:
+            return int(raw) if raw else 20
+        except ValueError:
+            return 20
+
     def _on_follow_event(self, nickname: str):
-        if self.announce_follow_var.get():
+        if self.announce_follow_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
             self._announce(f"{nickname} последва канала!")
 
     def _on_share_event(self, nickname: str):
-        if self.announce_share_var.get():
+        if self.announce_share_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
             self._announce(f"{nickname} сподели стрийма!")
 
     def _on_gift_shoutout(self, nickname: str, gift_name: str):
         gn = (gift_name or "").strip()
         if gn.lower() == HEART_ME_GIFT_NAME:
             return  # Heart Me си има собствена логика, не го обявяваме отделно
-        if self.announce_gift_var.get() and gn:
+        if (
+            self.announce_gift_var.get()
+            and gn
+            and is_reasonable_name(nickname, self._get_max_name_len())
+        ):
             self._announce(f"{nickname} прати подарък {gn}!")
 
     def _on_viewer_count_event(self, viewer_count):
@@ -724,7 +892,7 @@ class App(ctk.CTk):
         rate_pct = max(-80, min(rate_pct, 100))
 
         vol_pct = round((volume_mult - 1.0) * 100)
-        vol_pct = max(-50, min(vol_pct, 100))
+        vol_pct = max(-95, min(vol_pct, 100))
 
         return f"{rate_pct:+d}%", f"{vol_pct:+d}%"
 
@@ -740,13 +908,16 @@ class App(ctk.CTk):
                 if selected == "piper":
                     if self.voice is None:
                         continue
-                    import wave
 
                     syn_config = self._get_synthesis_config()
                     fd, tmp_path = tempfile.mkstemp(suffix=".wav")
                     os.close(fd)
                     with wave.open(tmp_path, "wb") as wav_file:
                         self.voice.synthesize_wav(text, wav_file, syn_config=syn_config)
+
+                    effect = self.voice_effect_menu.get()
+                    if effect != "Няма":
+                        apply_voice_effect(tmp_path, effect)
 
                     sound = pygame.mixer.Sound(tmp_path)
                     channel = sound.play()
