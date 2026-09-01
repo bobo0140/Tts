@@ -34,6 +34,7 @@ jobs:
             --collect-data certifi `
             --collect-all edge_tts `
             --collect-all TikTokLive `
+            --collect-all sounddevice `
             main.py
 
       - name: Upload EXE as artifact

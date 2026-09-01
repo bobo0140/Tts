@@ -317,6 +317,29 @@ class GeminiError(Exception):
     pass
 
 
+# --------------------------------------------------------------------------
+# Gemini Live API (говор-към-говор, реално време)
+# --------------------------------------------------------------------------
+
+LIVE_WS_URL = (
+    "wss://generativelanguage.googleapis.com/ws/"
+    "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={key}"
+)
+LIVE_INPUT_RATE = 16000   # Live API изисква 16kHz вход
+LIVE_OUTPUT_RATE = 24000  # и връща 24kHz изход
+
+LIVE_SYSTEM_PROMPT = (
+    "Ти си енергичен български AI съ-водещ на TikTok Live стрийм. "
+    "Говориш САМО на български, кратко и разговорно — по 1-2 изречения. "
+    "Ще получаваш съобщения за случки в стрийма (нови последователи, споделяния, "
+    "коментари от чата) и понякога стриймърът ще ти говори директно. "
+    "Реагирай живо: поздравявай новите последователи, благодари на тези, които "
+    "споделят, коментирай коментарите с лека шега. Ако име звучи смешно или "
+    "странно, може да се пошегуваш добронамерено с него, но никога обидно. "
+    "Когато стриймърът те пита нещо, отговаряй му директно и кратко."
+)
+
+
 def call_gemini(api_key: str, model: str, nickname: str, comment: str, timeout: int = 15) -> str:
     """Праща коментар на Gemini и връща кратка AI реакция на български.
     Хвърля GeminiError с четимо съобщение при проблем."""
@@ -392,6 +415,15 @@ class App(ctk.CTk):
         self.ai_request_queue: "queue.Queue" = queue.Queue()
         self.ai_comment_counter = 0
 
+        # Live AI (Gemini Live API)
+        self.live_running = False
+        self.live_loop: asyncio.AbstractEventLoop | None = None
+        self.live_ws = None
+        self.live_text_queue: "queue.Queue" = queue.Queue()   # събития -> AI
+        self.live_mic_queue: "queue.Queue" = queue.Queue()    # микрофон -> AI
+        self.live_mic_stream = None
+        self.live_comment_counter = 0
+
         self._build_ui()
 
         threading.Thread(target=self._ai_worker, daemon=True).start()
@@ -433,6 +465,7 @@ class App(ctk.CTk):
         tab_events = self.tabview.add("Събития")
         tab_voice = self.tabview.add("Глас")
         tab_ai = self.tabview.add("AI")
+        tab_live = self.tabview.add("Live AI")
 
         # ---------------- Таб "Основно" ----------------
         top = ctk.CTkFrame(tab_main)
@@ -751,6 +784,92 @@ class App(ctk.CTk):
             justify="left",
         ).pack(anchor="w", padx=14, pady=(0, 8))
 
+        # ---------------- Таб "Live AI" ----------------
+        ctk.CTkLabel(
+            tab_live,
+            text="Live AI (Gemini Live API) — говор-към-говор в реално време. AI-то "
+            "говори със собствен глас, поздравява нови последователи и споделяния, "
+            "коментира чата, и може да слуша теб през микрофона и да ти отговаря. "
+            "Ползва същия Gemini ключ от таб 'AI'.",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(8, 12))
+
+        live_btns = ctk.CTkFrame(tab_live)
+        live_btns.pack(fill="x", padx=14, pady=(0, 8))
+        self.live_start_btn = ctk.CTkButton(
+            live_btns, text="Свържи Live AI", command=self.start_live_ai
+        )
+        self.live_start_btn.pack(side="left", padx=(0, 8))
+        self.live_stop_btn = ctk.CTkButton(
+            live_btns, text="Спри Live AI", command=self.stop_live_ai, state="disabled"
+        )
+        self.live_stop_btn.pack(side="left")
+
+        self.live_status_label = ctk.CTkLabel(tab_live, text="Не е свързан.", text_color="gray")
+        self.live_status_label.pack(fill="x", padx=14, pady=(0, 10))
+
+        live_model_frame = ctk.CTkFrame(tab_live)
+        live_model_frame.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(live_model_frame, text="Live модел:", width=190, anchor="w").pack(side="left")
+        self.live_model_entry = ctk.CTkEntry(live_model_frame)
+        self.live_model_entry.insert(0, "gemini-live-2.5-flash-preview")
+        self.live_model_entry.pack(side="left", fill="x", expand=True)
+
+        live_voice_frame = ctk.CTkFrame(tab_live)
+        live_voice_frame.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(live_voice_frame, text="Глас на AI-то:", width=190, anchor="w").pack(side="left")
+        self.live_voice_menu = ctk.CTkOptionMenu(
+            live_voice_frame, values=["Puck", "Charon", "Kore", "Fenrir", "Aoede"]
+        )
+        self.live_voice_menu.set("Puck")
+        self.live_voice_menu.pack(side="left", fill="x", expand=True)
+
+        ctk.CTkLabel(
+            tab_live, text="Какво да подава на AI-то:", text_color="gray"
+        ).pack(anchor="w", padx=14, pady=(4, 2))
+
+        self.live_feed_follow_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab_live, text="Нови последователи (с коментар за смешни имена)",
+            variable=self.live_feed_follow_var
+        ).pack(anchor="w", padx=14, pady=4)
+
+        self.live_feed_share_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab_live, text="Споделяния на стрийма", variable=self.live_feed_share_var
+        ).pack(anchor="w", padx=14, pady=4)
+
+        live_comment_row = ctk.CTkFrame(tab_live)
+        live_comment_row.pack(fill="x", padx=14, pady=4)
+        self.live_feed_comment_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            live_comment_row, text="Коментари от чата, на всеки", variable=self.live_feed_comment_var
+        ).pack(side="left", padx=(0, 8))
+        self.live_every_n_entry = ctk.CTkEntry(live_comment_row, width=60)
+        self.live_every_n_entry.insert(0, "5")
+        self.live_every_n_entry.pack(side="left")
+        ctk.CTkLabel(live_comment_row, text="-ти коментар").pack(side="left", padx=(6, 0))
+
+        mic_frame = ctk.CTkFrame(tab_live)
+        mic_frame.pack(fill="x", padx=14, pady=(12, 6))
+        self.live_mic_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            mic_frame, text="Пусни микрофона (AI-то те слуша и ти отговаря)",
+            variable=self.live_mic_var, command=self._on_mic_toggle
+        ).pack(side="left")
+
+        ctk.CTkLabel(
+            tab_live,
+            text="Микрофонът се включва/изключва по всяко време, дори докато Live AI "
+            "е свързан. Ако го оставиш изключен, AI-то само коментира стрийма, без да "
+            "те слуша (така харчиш по-малко от лимита).",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
     def _log(self, msg: str):
         self.log_queue.put(msg)
 
@@ -919,6 +1038,7 @@ class App(ctk.CTk):
             return
         self._enqueue_latest_only(speech_text)
         self._maybe_trigger_ai_commentary(nickname, comment)
+        self._maybe_feed_live_comment(nickname, comment)
 
     def _register_heart_me_gift(self, nickname: str, user_key: str, gift_name: str):
         if (gift_name or "").strip().lower() == HEART_ME_GIFT_NAME and user_key:
@@ -958,6 +1078,231 @@ class App(ctk.CTk):
 
         self.ai_request_queue.put((nickname, comment))
 
+    def _maybe_feed_live_comment(self, nickname: str, comment: str):
+        """Подава коментар на Live AI-то на всеки N-ти (собствен брояч,
+        независим от текстовия AI коментатор в таб 'AI')."""
+        if not self.live_running or not self.live_feed_comment_var.get():
+            return
+
+        self.live_comment_counter += 1
+        raw = self.live_every_n_entry.get().strip()
+        try:
+            n = max(1, int(raw)) if raw else 5
+        except ValueError:
+            n = 5
+        if self.live_comment_counter % n != 0:
+            return
+
+        self._feed_live(f'Зрителят "{nickname}" написа в чата: "{comment}". Реагирай кратко.')
+
+    # ------------------------------------------------------------------
+    # Live AI (Gemini Live API) — говор-към-говор
+    # ------------------------------------------------------------------
+    def start_live_ai(self):
+        api_key = self.gemini_api_key_entry.get().strip()
+        if not api_key:
+            self._log("[Live AI] Липсва Gemini API ключ — попълни го в таб 'AI'.")
+            return
+        if self.live_running:
+            return
+
+        self.live_running = True
+        self.live_start_btn.configure(state="disabled")
+        self.live_stop_btn.configure(state="normal")
+        self.live_status_label.configure(text="Свързване...", text_color="orange")
+
+        threading.Thread(target=self._run_live_client, args=(api_key,), daemon=True).start()
+
+    def stop_live_ai(self):
+        self.live_running = False
+        self._stop_mic()
+        if self.live_loop and self.live_ws:
+            try:
+                self.live_loop.call_soon_threadsafe(
+                    functools.partial(asyncio.ensure_future, self.live_ws.close())
+                )
+            except Exception:
+                pass
+        self.live_start_btn.configure(state="normal")
+        self.live_stop_btn.configure(state="disabled")
+        self.live_status_label.configure(text="Спрян.", text_color="gray")
+
+    def _feed_live(self, text: str):
+        """Подава текстово събитие на Live AI-то (ако е свързано)."""
+        if self.live_running:
+            self.live_text_queue.put(text)
+
+    def _on_mic_toggle(self):
+        if self.live_mic_var.get():
+            self._start_mic()
+        else:
+            self._stop_mic()
+
+    def _start_mic(self):
+        if self.live_mic_stream is not None:
+            return
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            self._log(f"[Live AI] Микрофонът не е достъпен: {e}")
+            self.live_mic_var.set(False)
+            return
+
+        def callback(indata, frames, time_info, status):
+            if self.live_running and self.live_mic_var.get():
+                self.live_mic_queue.put(bytes(indata))
+
+        try:
+            self.live_mic_stream = sd.RawInputStream(
+                samplerate=LIVE_INPUT_RATE, blocksize=1600, dtype="int16",
+                channels=1, callback=callback,
+            )
+            self.live_mic_stream.start()
+            self._log("[Live AI] Микрофонът е включен.")
+        except Exception as e:
+            self._log(f"[Live AI] Грешка при пускане на микрофона: {e}")
+            self.live_mic_stream = None
+            self.live_mic_var.set(False)
+
+    def _stop_mic(self):
+        if self.live_mic_stream is not None:
+            try:
+                self.live_mic_stream.stop()
+                self.live_mic_stream.close()
+            except Exception:
+                pass
+            self.live_mic_stream = None
+            self._log("[Live AI] Микрофонът е изключен.")
+
+    def _run_live_client(self, api_key: str):
+        import base64
+        import websockets
+
+        self.live_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.live_loop)
+
+        model = self.live_model_entry.get().strip() or "gemini-live-2.5-flash-preview"
+        voice = self.live_voice_menu.get()
+        url = LIVE_WS_URL.format(key=api_key)
+
+        async def sender(ws):
+            """Праща микрофонно аудио и текстови събития към AI-то."""
+            while self.live_running:
+                sent_something = False
+
+                # микрофон
+                try:
+                    while True:
+                        chunk = self.live_mic_queue.get_nowait()
+                        await ws.send(json.dumps({
+                            "realtimeInput": {
+                                "mediaChunks": [{
+                                    "mimeType": f"audio/pcm;rate={LIVE_INPUT_RATE}",
+                                    "data": base64.b64encode(chunk).decode("ascii"),
+                                }]
+                            }
+                        }))
+                        sent_something = True
+                except queue.Empty:
+                    pass
+
+                # текстови събития от стрийма
+                try:
+                    while True:
+                        text = self.live_text_queue.get_nowait()
+                        await ws.send(json.dumps({
+                            "clientContent": {
+                                "turns": [{"role": "user", "parts": [{"text": text}]}],
+                                "turnComplete": True,
+                            }
+                        }))
+                        self._log(f"[Live AI ->] {text}")
+                        sent_something = True
+                except queue.Empty:
+                    pass
+
+                await asyncio.sleep(0.01 if sent_something else 0.05)
+
+        async def receiver(ws, out_stream):
+            """Получава аудио от AI-то и го пуска през говорителите."""
+            async for raw in ws:
+                if not self.live_running:
+                    break
+                try:
+                    msg = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+                server_content = msg.get("serverContent") or {}
+                model_turn = server_content.get("modelTurn") or {}
+                for part in model_turn.get("parts", []):
+                    inline = part.get("inlineData") or {}
+                    data_b64 = inline.get("data")
+                    if data_b64 and out_stream is not None:
+                        try:
+                            out_stream.write(base64.b64decode(data_b64))
+                        except Exception:
+                            pass
+                    text = part.get("text")
+                    if text:
+                        self._log(f"[Live AI] {text}")
+
+        async def run():
+            out_stream = None
+            try:
+                import sounddevice as sd
+                out_stream = sd.RawOutputStream(
+                    samplerate=LIVE_OUTPUT_RATE, dtype="int16", channels=1
+                )
+                out_stream.start()
+            except Exception as e:
+                self._log(f"[Live AI] Няма изход за звук ({e}) — ще виждаш само текста.")
+
+            async with websockets.connect(url, max_size=None) as ws:
+                self.live_ws = ws
+                await ws.send(json.dumps({
+                    "setup": {
+                        "model": f"models/{model}",
+                        "generationConfig": {
+                            "responseModalities": ["AUDIO"],
+                            "speechConfig": {
+                                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
+                            },
+                        },
+                        "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT}]},
+                    }
+                }))
+                await ws.recv()  # setupComplete
+
+                self._log("[Live AI] Свързан и готов.")
+                self.live_status_label.configure(text="Свързан ✓", text_color="lightgreen")
+
+                await asyncio.gather(sender(ws), receiver(ws, out_stream))
+
+            if out_stream is not None:
+                try:
+                    out_stream.stop()
+                    out_stream.close()
+                except Exception:
+                    pass
+
+        try:
+            self.live_loop.run_until_complete(run())
+        except Exception as e:
+            self._log(f"[Live AI грешка] {e}")
+            self._log(
+                "[Съвет] Провери дали ключът е валиден, дали моделът съществува, "
+                "и дали не си достигнал лимита на безплатното ниво."
+            )
+            traceback.print_exc()
+        finally:
+            self.live_ws = None
+            self.live_running = False
+            self._stop_mic()
+            self.live_start_btn.configure(state="normal")
+            self.live_stop_btn.configure(state="disabled")
+            self.live_status_label.configure(text="Прекъснат.", text_color="gray")
+
     def _ai_worker(self):
         while True:
             nickname, comment = self.ai_request_queue.get()
@@ -972,18 +1317,25 @@ class App(ctk.CTk):
                 self._log(f"[AI грешка] {e}")
 
     def _on_follow_event(self, nickname: str):
+        if self.live_running and self.live_feed_follow_var.get():
+            self._feed_live(f"Нов последовател: {nickname}. Поздрави го.")
         if self.announce_follow_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
             self._announce(f"{nickname} последва канала!")
 
     def _on_share_event(self, nickname: str, user_key: str = ""):
-        if not self.announce_share_var.get():
-            return
+        # Едно споделяне на човек за сесията — важи и за Live AI, и за TTS
         if user_key and user_key in self.announced_sharers:
-            return  # вече му обявихме споделянето веднъж - не спамим повторно
-        if not is_reasonable_name(nickname, self._get_max_name_len()):
             return
         if user_key:
             self.announced_sharers.add(user_key)
+
+        if self.live_running and self.live_feed_share_var.get():
+            self._feed_live(f"{nickname} току-що сподели стрийма. Благодари му.")
+
+        if not self.announce_share_var.get():
+            return
+        if not is_reasonable_name(nickname, self._get_max_name_len()):
+            return
         self._announce(f"{nickname} сподели стрийма!")
 
     def _on_gift_shoutout(self, nickname: str, gift_name: str):

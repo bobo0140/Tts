@@ -5,4 +5,5 @@ piper-tts==1.7.0
 edge-tts==7.2.8
 TikTokLive==7.0.0
 websockets==17.1
+sounddevice==0.5.1
 pyinstaller==6.11.1
