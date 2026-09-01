@@ -32,6 +32,7 @@ from pathlib import Path
 
 import numpy as np
 import customtkinter as ctk
+import tkinter
 import pygame
 
 from piper import PiperVoice
@@ -378,6 +379,91 @@ def call_gemini(api_key: str, model: str, nickname: str, comment: str, timeout: 
 # Приложение
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# Поправка за копиране/поставяне при кирилична подредба на клавиатурата
+# --------------------------------------------------------------------------
+# При българска подредба Ctrl+V праща кирилски символ и tkinter не разпознава
+# вградената команда за поставяне. Затова връзваме по keycode (който не зависи
+# от подредбата) и добавяме меню с десен бутон.
+
+_KEYCODE_A, _KEYCODE_C, _KEYCODE_V, _KEYCODE_X = 65, 67, 86, 88
+
+
+def enable_clipboard(widget):
+    """Прави Ctrl+C/V/X/A да работят в полето независимо от езика на клавиатурата,
+    и добавя меню с десен бутон (Постави / Копирай / Изрежи / Избери всичко)."""
+
+    def do_paste(_event=None):
+        try:
+            text = widget.clipboard_get()
+        except Exception:
+            return "break"
+        try:
+            if widget.selection_present():
+                widget.delete("sel.first", "sel.last")
+        except Exception:
+            pass
+        widget.insert("insert", text.strip())
+        return "break"
+
+    def do_copy(_event=None):
+        try:
+            if widget.selection_present():
+                widget.clipboard_clear()
+                widget.clipboard_append(widget.selection_get())
+        except Exception:
+            pass
+        return "break"
+
+    def do_cut(_event=None):
+        do_copy()
+        try:
+            if widget.selection_present():
+                widget.delete("sel.first", "sel.last")
+        except Exception:
+            pass
+        return "break"
+
+    def do_select_all(_event=None):
+        try:
+            widget.select_range(0, "end")
+            widget.icursor("end")
+        except Exception:
+            pass
+        return "break"
+
+    def on_ctrl_key(event):
+        # keycode не зависи от подредбата на клавиатурата (V винаги е 86 и т.н.)
+        if event.keycode == _KEYCODE_V:
+            return do_paste()
+        if event.keycode == _KEYCODE_C:
+            return do_copy()
+        if event.keycode == _KEYCODE_X:
+            return do_cut()
+        if event.keycode == _KEYCODE_A:
+            return do_select_all()
+        return None
+
+    widget.bind("<Control-KeyPress>", on_ctrl_key)
+    widget.bind("<Shift-Insert>", do_paste)
+
+    menu = tkinter.Menu(widget, tearoff=0)
+    menu.add_command(label="Постави", command=do_paste)
+    menu.add_command(label="Копирай", command=do_copy)
+    menu.add_command(label="Изрежи", command=do_cut)
+    menu.add_separator()
+    menu.add_command(label="Избери всичко", command=do_select_all)
+
+    def show_menu(event):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    widget.bind("<Button-3>", show_menu)
+    return widget
+
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -426,6 +512,7 @@ class App(ctk.CTk):
         self.live_comment_counter = 0
 
         self._build_ui()
+        self._enable_clipboard_everywhere()
 
         threading.Thread(target=self._ai_worker, daemon=True).start()
 
@@ -753,6 +840,10 @@ class App(ctk.CTk):
         self.gemini_api_key_entry = ctk.CTkEntry(key_frame_ai, show="*")
         self.gemini_api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(
+            key_frame_ai, text="Постави", width=80,
+            command=lambda: self._paste_into(self.gemini_api_key_entry),
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
             key_frame_ai, text="Вземи ключ ↗", width=110,
             command=lambda: webbrowser.open("https://aistudio.google.com/apikey"),
         ).pack(side="left")
@@ -1020,6 +1111,35 @@ class App(ctk.CTk):
         self.live_comment_counter = 0
         self.last_viewer_announcement_time = 0.0
         self._log("[Тест] Паметта е изчистена — може да тестваш отначало.")
+
+    def _paste_into(self, entry):
+        """Поставя от клипборда в подаденото поле (за бутона 'Постави')."""
+        try:
+            text = self.clipboard_get().strip()
+        except Exception:
+            self._log("[Клипборд] Клипбордът е празен или недостъпен.")
+            return
+        entry.delete(0, "end")
+        entry.insert(0, text)
+
+    def _enable_clipboard_everywhere(self):
+        """Прилага поправката за копиране/поставяне върху всички полета в
+        приложението (важно при кирилична подредба на клавиатурата)."""
+        count = 0
+
+        def walk(widget):
+            nonlocal count
+            for child in widget.winfo_children():
+                if isinstance(child, ctk.CTkEntry):
+                    try:
+                        enable_clipboard(child)
+                        count += 1
+                    except Exception:
+                        pass
+                walk(child)
+
+        walk(self)
+        return count
 
     def _log(self, msg: str):
         self.log_queue.put(msg)
