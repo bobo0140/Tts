@@ -22,6 +22,7 @@ pyinstaller --noconfirm --onefile --windowed --name TikTokTTS ^
     --collect-all edge_tts ^
     --collect-all TikTokLive ^
     --collect-all sounddevice ^
+    --collect-all keyboard ^
     main.py
 
 echo [4/4] Done!

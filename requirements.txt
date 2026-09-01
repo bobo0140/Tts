@@ -6,4 +6,5 @@ edge-tts==7.2.8
 TikTokLive==7.0.0
 websockets==17.1
 sounddevice==0.5.1
+keyboard==0.13.5
 pyinstaller==6.11.1

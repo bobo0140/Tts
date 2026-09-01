@@ -35,6 +35,7 @@ jobs:
             --collect-all edge_tts `
             --collect-all TikTokLive `
             --collect-all sounddevice `
+            --collect-all keyboard `
             main.py
 
       - name: Upload EXE as artifact

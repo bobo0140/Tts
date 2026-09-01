@@ -26,6 +26,7 @@ import traceback
 import urllib.error
 import urllib.request
 import wave
+import webbrowser
 from collections import deque
 from pathlib import Path
 
@@ -466,6 +467,7 @@ class App(ctk.CTk):
         tab_voice = self.tabview.add("Глас")
         tab_ai = self.tabview.add("AI")
         tab_live = self.tabview.add("Live AI")
+        tab_test = self.tabview.add("Тест")
 
         # ---------------- Таб "Основно" ----------------
         top = ctk.CTkFrame(tab_main)
@@ -749,7 +751,11 @@ class App(ctk.CTk):
         key_frame_ai.pack(fill="x", padx=14, pady=(0, 8))
         ctk.CTkLabel(key_frame_ai, text="Gemini API ключ:", width=200, anchor="w").pack(side="left")
         self.gemini_api_key_entry = ctk.CTkEntry(key_frame_ai, show="*")
-        self.gemini_api_key_entry.pack(side="left", fill="x", expand=True)
+        self.gemini_api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(
+            key_frame_ai, text="Вземи ключ ↗", width=110,
+            command=lambda: webbrowser.open("https://aistudio.google.com/apikey"),
+        ).pack(side="left")
 
         model_frame_ai = ctk.CTkFrame(tab_ai)
         model_frame_ai.pack(fill="x", padx=14, pady=(0, 12))
@@ -860,6 +866,42 @@ class App(ctk.CTk):
             variable=self.live_mic_var, command=self._on_mic_toggle
         ).pack(side="left")
 
+        mic_dev_frame = ctk.CTkFrame(tab_live)
+        mic_dev_frame.pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkLabel(mic_dev_frame, text="Микрофон:", width=190, anchor="w").pack(side="left")
+        self.mic_device_menu = ctk.CTkOptionMenu(mic_dev_frame, values=["(по подразбиране)"])
+        self.mic_device_menu.set("(по подразбиране)")
+        self.mic_device_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(
+            mic_dev_frame, text="Опресни", width=90, command=self._refresh_mic_devices
+        ).pack(side="left")
+
+        hotkey_frame = ctk.CTkFrame(tab_live)
+        hotkey_frame.pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkLabel(hotkey_frame, text="Клавиш за микрофона:", width=190, anchor="w").pack(side="left")
+        self.hotkey_entry = ctk.CTkEntry(hotkey_frame, width=110)
+        self.hotkey_entry.insert(0, "f8")
+        self.hotkey_entry.pack(side="left", padx=(0, 8))
+        self.hotkey_mode_menu = ctk.CTkOptionMenu(
+            hotkey_frame, values=["Задръж за говорене", "Вкл./изкл. с натискане"], width=190
+        )
+        self.hotkey_mode_menu.set("Задръж за говорене")
+        self.hotkey_mode_menu.pack(side="left", padx=(0, 8))
+        self.hotkey_btn = ctk.CTkButton(
+            hotkey_frame, text="Активирай", width=100, command=self._toggle_hotkey
+        )
+        self.hotkey_btn.pack(side="left")
+
+        ctk.CTkLabel(
+            tab_live,
+            text="Клавишът работи и когато прозорецът не е на фокус (напр. докато "
+            "играеш). Примери: f8, ctrl+shift+m, alt+v. Ако Windows или антивирусът "
+            "блокира глобалните клавиши, ползвай отметката горе ръчно.",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
         ctk.CTkLabel(
             tab_live,
             text="Микрофонът се включва/изключва по всяко време, дори докато Live AI "
@@ -869,6 +911,115 @@ class App(ctk.CTk):
             wraplength=560,
             justify="left",
         ).pack(anchor="w", padx=14, pady=(0, 8))
+
+        # ---------------- Таб "Тест" ----------------
+        ctk.CTkLabel(
+            tab_test,
+            text="Тествай всичко без истински лайв. Бутоните по-долу симулират реални "
+            "събития и минават през същите филтри, гласове и AI логика, все едно идват "
+            "от TikTok.",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(8, 12))
+
+        test_name_frame = ctk.CTkFrame(tab_test)
+        test_name_frame.pack(fill="x", padx=14, pady=(0, 6))
+        ctk.CTkLabel(test_name_frame, text="Име за тест:", width=140, anchor="w").pack(side="left")
+        self.test_name_entry = ctk.CTkEntry(test_name_frame)
+        self.test_name_entry.insert(0, "ТестовПотребител")
+        self.test_name_entry.pack(side="left", fill="x", expand=True)
+
+        test_comment_frame = ctk.CTkFrame(tab_test)
+        test_comment_frame.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(test_comment_frame, text="Коментар за тест:", width=140, anchor="w").pack(side="left")
+        self.test_comment_entry = ctk.CTkEntry(test_comment_frame)
+        self.test_comment_entry.insert(0, "Zdravei kak si")
+        self.test_comment_entry.pack(side="left", fill="x", expand=True)
+
+        row1 = ctk.CTkFrame(tab_test)
+        row1.pack(fill="x", padx=14, pady=4)
+        ctk.CTkButton(row1, text="Тест: коментар", command=self._test_comment).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(row1, text="Тест: нов последовател", command=self._test_follow).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(row1, text="Тест: споделяне", command=self._test_share).pack(side="left")
+
+        row2 = ctk.CTkFrame(tab_test)
+        row2.pack(fill="x", padx=14, pady=4)
+        ctk.CTkButton(row2, text="Тест: подарък (Роза)", command=self._test_gift).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(row2, text="Тест: Heart Me подарък", command=self._test_heart_me).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(row2, text="Тест: брой зрители", command=self._test_viewers).pack(side="left")
+
+        row3 = ctk.CTkFrame(tab_test)
+        row3.pack(fill="x", padx=14, pady=(4, 12))
+        ctk.CTkButton(row3, text="Тест: спам (5 бързи коментара)", command=self._test_spam).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(row3, text="Изчисти тест паметта", command=self._test_reset).pack(side="left")
+
+        ctk.CTkLabel(
+            tab_test,
+            text="Съвет: 'Изчисти тест паметта' нулира кой вече е споделял и кой е "
+            "пращал Heart Me, за да можеш да тестваш същите неща отново.",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
+    # ------------------------------------------------------------------
+    # Тестови симулации
+    # ------------------------------------------------------------------
+    def _test_name(self) -> str:
+        return self.test_name_entry.get().strip() or "ТестовПотребител"
+
+    def _test_comment(self):
+        name = self._test_name()
+        text = self.test_comment_entry.get().strip() or "тестов коментар"
+        self._log("--- ТЕСТ: коментар ---")
+        self._process_incoming_comment(name, "test_user", text, False)
+
+    def _test_follow(self):
+        self._log("--- ТЕСТ: нов последовател ---")
+        self._on_follow_event(self._test_name())
+
+    def _test_share(self):
+        self._log("--- ТЕСТ: споделяне ---")
+        self._on_share_event(self._test_name(), "test_user")
+
+    def _test_gift(self):
+        self._log("--- ТЕСТ: подарък ---")
+        self._on_gift_shoutout(self._test_name(), "Роза")
+
+    def _test_heart_me(self):
+        self._log("--- ТЕСТ: Heart Me подарък ---")
+        self._register_heart_me_gift(self._test_name(), "test_user", "Heart Me")
+
+    def _test_viewers(self):
+        self._log("--- ТЕСТ: брой зрители ---")
+        self.last_viewer_announcement_time = 0.0  # за да не го спре throttle-ът
+        self._on_viewer_count_event(123)
+
+    def _test_spam(self):
+        self._log("--- ТЕСТ: спам (5 еднакви коментара) ---")
+        for i in range(5):
+            self._process_incoming_comment(self._test_name(), "test_spammer", "спам съобщение", False)
+
+    def _test_reset(self):
+        self.announced_sharers.clear()
+        self.heart_me_senders.clear()
+        self.confirmed_subscribers.clear()
+        self.recent_comments.clear()
+        self.ai_comment_counter = 0
+        self.live_comment_counter = 0
+        self.last_viewer_announcement_time = 0.0
+        self._log("[Тест] Паметта е изчистена — може да тестваш отначало.")
 
     def _log(self, msg: str):
         self.log_queue.put(msg)
@@ -1138,6 +1289,88 @@ class App(ctk.CTk):
         else:
             self._stop_mic()
 
+    def _refresh_mic_devices(self):
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+        except Exception as e:
+            self._log(f"[Микрофон] Не мога да прочета устройствата: {e}")
+            return
+
+        names = ["(по подразбиране)"]
+        self.mic_device_map = {}
+        for idx, dev in enumerate(devices):
+            if dev.get("max_input_channels", 0) > 0:
+                label = f"{idx}: {dev['name']}"[:60]
+                names.append(label)
+                self.mic_device_map[label] = idx
+
+        current = self.mic_device_menu.get()
+        self.mic_device_menu.configure(values=names)
+        if current not in names:
+            self.mic_device_menu.set("(по подразбиране)")
+        self._log(f"[Микрофон] Намерени {len(names) - 1} входни устройства.")
+
+    def _get_selected_mic_device(self):
+        label = self.mic_device_menu.get()
+        if label == "(по подразбиране)":
+            return None
+        return getattr(self, "mic_device_map", {}).get(label)
+
+    def _toggle_hotkey(self):
+        if getattr(self, "hotkey_active", False):
+            self._unregister_hotkey()
+        else:
+            self._register_hotkey()
+
+    def _register_hotkey(self):
+        combo = self.hotkey_entry.get().strip()
+        if not combo:
+            self._log("[Клавиш] Въведи клавиш (напр. f8).")
+            return
+        try:
+            import keyboard
+        except Exception as e:
+            self._log(f"[Клавиш] Библиотеката за глобални клавиши не е достъпна: {e}")
+            return
+
+        hold_mode = self.hotkey_mode_menu.get() == "Задръж за говорене"
+
+        try:
+            if hold_mode:
+                keyboard.on_press_key(combo, lambda _e: self._hotkey_set_mic(True))
+                keyboard.on_release_key(combo, lambda _e: self._hotkey_set_mic(False))
+            else:
+                keyboard.add_hotkey(combo, self._hotkey_toggle_mic)
+        except Exception as e:
+            self._log(f"[Клавиш] Не мога да регистрирам '{combo}': {e}")
+            return
+
+        self.hotkey_active = True
+        self.hotkey_combo = combo
+        self.hotkey_btn.configure(text="Изключи")
+        mode_text = "задържане" if hold_mode else "превключване"
+        self._log(f"[Клавиш] '{combo}' е активен ({mode_text}).")
+
+    def _unregister_hotkey(self):
+        try:
+            import keyboard
+            keyboard.unhook_all()
+        except Exception:
+            pass
+        self.hotkey_active = False
+        self.hotkey_btn.configure(text="Активирай")
+        self._log("[Клавиш] Изключен.")
+
+    def _hotkey_set_mic(self, on: bool):
+        if self.live_mic_var.get() == on:
+            return
+        self.live_mic_var.set(on)
+        self._on_mic_toggle()
+
+    def _hotkey_toggle_mic(self):
+        self._hotkey_set_mic(not self.live_mic_var.get())
+
     def _start_mic(self):
         if self.live_mic_stream is not None:
             return
@@ -1155,7 +1388,7 @@ class App(ctk.CTk):
         try:
             self.live_mic_stream = sd.RawInputStream(
                 samplerate=LIVE_INPUT_RATE, blocksize=1600, dtype="int16",
-                channels=1, callback=callback,
+                channels=1, callback=callback, device=self._get_selected_mic_device(),
             )
             self.live_mic_stream.start()
             self._log("[Live AI] Микрофонът е включен.")
