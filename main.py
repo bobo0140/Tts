@@ -13,6 +13,7 @@ TikTok Live TTS Reader (Bulgarian) — MVP
 
 import asyncio
 import functools
+import json
 import os
 import queue
 import random
@@ -22,6 +23,8 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.error
+import urllib.request
 import wave
 from collections import deque
 from pathlib import Path
@@ -298,6 +301,56 @@ def is_reasonable_name(name: str, max_len: int = 20) -> bool:
 
 
 # --------------------------------------------------------------------------
+# Gemini AI коментатор (по избор, ползва безплатен/платен Gemini API ключ)
+# --------------------------------------------------------------------------
+
+GEMINI_SYSTEM_PROMPT = (
+    "Ти си остроумен AI съ-водещ на български TikTok Live стрийм. "
+    "Зрител написа коментар в чата. Реагирай на него кратко (най-много 15-20 думи), "
+    "разговорно, на български. Понякога вметни лека шега, но не бъди обиден или груб. "
+    "Не повтаряй коментара дословно — реагирай на смисъла му. "
+    "Отговори само с репликата, без обяснения, без кавички."
+)
+
+
+class GeminiError(Exception):
+    pass
+
+
+def call_gemini(api_key: str, model: str, nickname: str, comment: str, timeout: int = 15) -> str:
+    """Праща коментар на Gemini и връща кратка AI реакция на български.
+    Хвърля GeminiError с четимо съобщение при проблем."""
+    if not api_key:
+        raise GeminiError("Липсва Gemini API ключ.")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    prompt = f"{GEMINI_SYSTEM_PROMPT}\n\nПотребител \"{nickname}\" написа: \"{comment}\""
+    payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="ignore")
+        if e.code == 429:
+            raise GeminiError("Достигнат е лимитът на Gemini API (твърде много заявки).") from e
+        raise GeminiError(f"Gemini API грешка {e.code}: {body[:200]}") from e
+    except urllib.error.URLError as e:
+        raise GeminiError(f"Няма връзка с Gemini API: {e.reason}") from e
+    except TimeoutError:
+        raise GeminiError("Gemini API не отговори навреме.")
+
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return text.strip()
+    except (KeyError, IndexError, TypeError) as e:
+        raise GeminiError(f"Неочакван отговор от Gemini: {data}") from e
+
+
+# --------------------------------------------------------------------------
 # Приложение
 # --------------------------------------------------------------------------
 
@@ -335,7 +388,13 @@ class App(ctk.CTk):
         # Потребители, чието споделяне вече е било обявено (за да не спамим при 2+ споделяния)
         self.announced_sharers: set[str] = set()
 
+        # AI коментатор (Gemini) - опашка + брояч за throttling "на всеки N-ти"
+        self.ai_request_queue: "queue.Queue" = queue.Queue()
+        self.ai_comment_counter = 0
+
         self._build_ui()
+
+        threading.Thread(target=self._ai_worker, daemon=True).start()
 
         try:
             pygame.mixer.init()
@@ -373,6 +432,7 @@ class App(ctk.CTk):
         tab_filters = self.tabview.add("Филтри")
         tab_events = self.tabview.add("Събития")
         tab_voice = self.tabview.add("Глас")
+        tab_ai = self.tabview.add("AI")
 
         # ---------------- Таб "Основно" ----------------
         top = ctk.CTkFrame(tab_main)
@@ -635,6 +695,62 @@ class App(ctk.CTk):
             tab_voice, text="Пробвай гласа с тези настройки", command=self._preview_voice
         ).pack(anchor="w", padx=14, pady=(10, 8))
 
+        # ---------------- Таб "AI" ----------------
+        ctk.CTkLabel(
+            tab_ai,
+            text="AI коментатор (Gemini) — след като коментар се прочете, AI-то реагира "
+            "кратко на него, понякога с шега. Изисква безплатен/платен Gemini API ключ "
+            "от aistudio.google.com (НЕ е нужен login с Google в приложението — само "
+            "ключ, копи-пейст).",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(8, 12))
+
+        self.ai_enabled_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab_ai, text="Активирай AI коментатор", variable=self.ai_enabled_var
+        ).pack(anchor="w", padx=14, pady=(0, 10))
+
+        key_frame_ai = ctk.CTkFrame(tab_ai)
+        key_frame_ai.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(key_frame_ai, text="Gemini API ключ:", width=200, anchor="w").pack(side="left")
+        self.gemini_api_key_entry = ctk.CTkEntry(key_frame_ai, show="*")
+        self.gemini_api_key_entry.pack(side="left", fill="x", expand=True)
+
+        model_frame_ai = ctk.CTkFrame(tab_ai)
+        model_frame_ai.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(model_frame_ai, text="Gemini модел:", width=200, anchor="w").pack(side="left")
+        self.gemini_model_entry = ctk.CTkEntry(model_frame_ai)
+        self.gemini_model_entry.insert(0, "gemini-2.5-flash-lite")
+        self.gemini_model_entry.pack(side="left", fill="x", expand=True)
+
+        freq_frame = ctk.CTkFrame(tab_ai)
+        freq_frame.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(freq_frame, text="Реагирай на:", width=200, anchor="w").pack(side="left")
+        self.ai_frequency_menu = ctk.CTkSegmentedButton(
+            freq_frame, values=["Всеки коментар", "На всеки N-ти"]
+        )
+        self.ai_frequency_menu.set("На всеки N-ти")
+        self.ai_frequency_menu.pack(side="left", fill="x", expand=True)
+
+        n_frame = ctk.CTkFrame(tab_ai)
+        n_frame.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkLabel(n_frame, text="N (при 'На всеки N-ти'):", width=200, anchor="w").pack(side="left")
+        self.ai_every_n_entry = ctk.CTkEntry(n_frame, width=70)
+        self.ai_every_n_entry.insert(0, "10")
+        self.ai_every_n_entry.pack(side="left")
+
+        ctk.CTkLabel(
+            tab_ai,
+            text="Съвет: без платено разплащане в Google Cloud, безплатният лимит е "
+            "~10-15 заявки/минута — 'На всеки N-ти' пази в тези граници. Ако имаш "
+            "включено разплащане, може спокойно да пуснеш 'Всеки коментар'.",
+            text_color="gray",
+            wraplength=560,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 8))
+
     def _log(self, msg: str):
         self.log_queue.put(msg)
 
@@ -802,6 +918,7 @@ class App(ctk.CTk):
         if speech_text is None:
             return
         self._enqueue_latest_only(speech_text)
+        self._maybe_trigger_ai_commentary(nickname, comment)
 
     def _register_heart_me_gift(self, nickname: str, user_key: str, gift_name: str):
         if (gift_name or "").strip().lower() == HEART_ME_GIFT_NAME and user_key:
@@ -820,6 +937,39 @@ class App(ctk.CTk):
             return int(raw) if raw else 20
         except ValueError:
             return 20
+
+    # ------------------------------------------------------------------
+    # AI коментатор (Gemini)
+    # ------------------------------------------------------------------
+    def _maybe_trigger_ai_commentary(self, nickname: str, comment: str):
+        if not self.ai_enabled_var.get():
+            return
+
+        self.ai_comment_counter += 1
+
+        if self.ai_frequency_menu.get() == "На всеки N-ти":
+            raw = self.ai_every_n_entry.get().strip()
+            try:
+                n = max(1, int(raw)) if raw else 10
+            except ValueError:
+                n = 10
+            if self.ai_comment_counter % n != 0:
+                return
+
+        self.ai_request_queue.put((nickname, comment))
+
+    def _ai_worker(self):
+        while True:
+            nickname, comment = self.ai_request_queue.get()
+            api_key = self.gemini_api_key_entry.get().strip()
+            model = self.gemini_model_entry.get().strip() or "gemini-2.5-flash-lite"
+            try:
+                reply = call_gemini(api_key, model, nickname, comment)
+                if reply:
+                    self._log(f"[AI] {reply}")
+                    self._enqueue_latest_only(reply)
+            except GeminiError as e:
+                self._log(f"[AI грешка] {e}")
 
     def _on_follow_event(self, nickname: str):
         if self.announce_follow_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
@@ -1035,7 +1185,6 @@ class App(ctk.CTk):
         self.tiktok_thread.start()
 
     def _run_tikfinity_client(self, url: str):
-        import json
         import websockets
 
         self.tikfinity_loop = asyncio.new_event_loop()
