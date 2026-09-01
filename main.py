@@ -330,6 +330,14 @@ LIVE_WS_URL = (
 LIVE_INPUT_RATE = 16000   # Live API изисква 16kHz вход
 LIVE_OUTPUT_RATE = 24000  # и връща 24kHz изход
 
+# Актуални Live модели за Gemini Developer API.
+# ВНИМАНИЕ: gemini-live-2.5-flash-preview беше спрян на 09.12.2025 — не го ползвай.
+LIVE_MODELS = [
+    "gemini-3.1-flash-live-preview",                  # препоръчан от Google
+    "gemini-2.5-flash-native-audio-preview-12-2025",
+    "gemini-2.5-flash-native-audio-preview-09-2025",
+]
+
 LIVE_SYSTEM_PROMPT = (
     "Ти си енергичен български AI съ-водещ на TikTok Live стрийм. "
     "Говориш САМО на български, кратко и разговорно — по 1-2 изречения. "
@@ -832,6 +840,12 @@ class App(ctk.CTk):
         self.ai_enabled_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             tab_ai, text="Активирай AI коментатор", variable=self.ai_enabled_var
+        ).pack(anchor="w", padx=14, pady=(0, 4))
+
+        self.ai_speak_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab_ai, text="Изговаряй AI отговорите на глас (иначе само в лога)",
+            variable=self.ai_speak_var
         ).pack(anchor="w", padx=14, pady=(0, 10))
 
         key_frame_ai = ctk.CTkFrame(tab_ai)
@@ -910,8 +924,8 @@ class App(ctk.CTk):
         live_model_frame = ctk.CTkFrame(tab_live)
         live_model_frame.pack(fill="x", padx=14, pady=(0, 8))
         ctk.CTkLabel(live_model_frame, text="Live модел:", width=190, anchor="w").pack(side="left")
-        self.live_model_entry = ctk.CTkEntry(live_model_frame)
-        self.live_model_entry.insert(0, "gemini-live-2.5-flash-preview")
+        self.live_model_entry = ctk.CTkOptionMenu(live_model_frame, values=LIVE_MODELS)
+        self.live_model_entry.set(LIVE_MODELS[0])
         self.live_model_entry.pack(side="left", fill="x", expand=True)
 
         live_voice_frame = ctk.CTkFrame(tab_live)
@@ -1056,6 +1070,23 @@ class App(ctk.CTk):
         ctk.CTkButton(row3, text="Изчисти тест паметта", command=self._test_reset).pack(side="left")
 
         ctk.CTkLabel(
+            tab_test, text="AI тестове (изискват Gemini ключ в таб 'AI'):",
+            text_color="gray"
+        ).pack(anchor="w", padx=14, pady=(10, 2))
+
+        row4 = ctk.CTkFrame(tab_test)
+        row4.pack(fill="x", padx=14, pady=(0, 12))
+        ctk.CTkButton(
+            row4, text="Тест връзка с Gemini", command=self._test_gemini_connection
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            row4, text="Тест: AI коментатор", command=self._test_ai_commentator
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            row4, text="Тест: изпрати към Live AI", command=self._test_live_feed
+        ).pack(side="left")
+
+        ctk.CTkLabel(
             tab_test,
             text="Съвет: 'Изчисти тест паметта' нулира кой вече е споделял и кой е "
             "пращал Heart Me, за да можеш да тестваш същите неща отново.",
@@ -1102,6 +1133,77 @@ class App(ctk.CTk):
         for i in range(5):
             self._process_incoming_comment(self._test_name(), "test_spammer", "спам съобщение", False)
 
+    def _test_gemini_connection(self):
+        """Проверява дали ключът работи и показва кои модели са налични."""
+        api_key = self.gemini_api_key_entry.get().strip()
+        if not api_key:
+            self._log("[Тест] Първо сложи Gemini ключ в таб 'AI'.")
+            return
+
+        self._log("--- ТЕСТ: връзка с Gemini ---")
+
+        def worker():
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+            try:
+                with urllib.request.urlopen(url, timeout=20) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="ignore")[:200]
+                self._log(f"[Тест] Ключът НЕ работи — грешка {e.code}: {body}")
+                return
+            except Exception as e:
+                self._log(f"[Тест] Няма връзка: {e}")
+                return
+
+            models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+            self._log(f"[Тест] ✓ Ключът работи! Достъпни са {len(models)} модела.")
+
+            live = [m for m in models if "live" in m or "native-audio" in m]
+            if live:
+                self._log(f"[Тест] Live модели за твоя ключ: {', '.join(live[:6])}")
+            else:
+                self._log(
+                    "[Тест] Не виждам Live модели за този ключ — Live AI може да не тръгне. "
+                    "Текстовият AI коментатор би трябвало да работи."
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_ai_commentator(self):
+        """Праща тестов коментар директно на Gemini и показва отговора."""
+        api_key = self.gemini_api_key_entry.get().strip()
+        if not api_key:
+            self._log("[Тест] Първо сложи Gemini ключ в таб 'AI'.")
+            return
+
+        name = self._test_name()
+        text = self.test_comment_entry.get().strip() or "тестов коментар"
+        model = self.gemini_model_entry.get().strip() or "gemini-2.5-flash-lite"
+        self._log(f"--- ТЕСТ: AI коментатор (модел {model}) ---")
+        self._log(f"[Тест] Пращам: \"{text}\" от {name}...")
+
+        def worker():
+            try:
+                reply = call_gemini(api_key, model, name, text)
+                self._log(f"[AI отговор] {reply}")
+                if self.ai_speak_var.get():
+                    self._enqueue_latest_only(reply)
+                else:
+                    self._log("[Тест] (Изговарянето е изключено — виж отметката в таб 'AI'.)")
+            except GeminiError as e:
+                self._log(f"[Тест] AI грешка: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_live_feed(self):
+        """Праща тестово съобщение към вече свързаното Live AI."""
+        if not self.live_running:
+            self._log("[Тест] Live AI не е свързан — натисни 'Свържи Live AI' в таб 'Live AI'.")
+            return
+        name = self._test_name()
+        self._log("--- ТЕСТ: съобщение към Live AI ---")
+        self._feed_live(f"Нов последовател: {name}. Поздрави го кратко.")
+
     def _test_reset(self):
         self.announced_sharers.clear()
         self.heart_me_senders.clear()
@@ -1111,6 +1213,20 @@ class App(ctk.CTk):
         self.live_comment_counter = 0
         self.last_viewer_announcement_time = 0.0
         self._log("[Тест] Паметта е изчистена — може да тестваш отначало.")
+
+    def _ui(self, fn, *args, **kwargs):
+        """Изпълнява UI промяна в главната нишка (tkinter не е thread-safe).
+        Без това обновяване от фонов процес хвърля 'main thread is not in main loop'."""
+        try:
+            self.after(0, lambda: fn(*args, **kwargs))
+        except Exception:
+            pass
+
+    def _set_status(self, label, text, color):
+        self._ui(label.configure, text=text, text_color=color)
+
+    def _set_btn(self, button, state):
+        self._ui(button.configure, state=state)
 
     def _paste_into(self, entry):
         """Поставя от клипборда в подаденото поле (за бутона 'Постави')."""
@@ -1180,12 +1296,13 @@ class App(ctk.CTk):
                 self._log("[Система] Гласът е свален успешно.")
 
             self.voice = PiperVoice.load(str(MODEL_PATH), str(CONFIG_PATH))
-            self.status_label.configure(text="Готово. Въведи потребителско име и натисни Старт.", text_color="lightgreen")
+            self._set_status(self.status_label, "Готово. Въведи потребителско име и натисни Старт.", "lightgreen")
         except Exception as e:
             self._log(f"[Грешка при зареждане на гласа] {e}")
-            self.status_label.configure(
-                text="Грешка при подготовка на гласа — виж лога. Провери интернет връзката.",
-                text_color="red",
+            self._set_status(
+                self.status_label,
+                "Грешка при подготовка на гласа — виж лога. Провери интернет връзката.",
+                "red",
             )
 
     # ------------------------------------------------------------------
@@ -1534,7 +1651,7 @@ class App(ctk.CTk):
         self.live_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.live_loop)
 
-        model = self.live_model_entry.get().strip() or "gemini-live-2.5-flash-preview"
+        model = self.live_model_entry.get().strip() or LIVE_MODELS[0]
         voice = self.live_voice_menu.get()
         url = LIVE_WS_URL.format(key=api_key)
 
@@ -1613,6 +1730,7 @@ class App(ctk.CTk):
 
             async with websockets.connect(url, max_size=None) as ws:
                 self.live_ws = ws
+                self._log(f"[Live AI] WebSocket отворен. Изпращам setup за модел '{model}'...")
                 await ws.send(json.dumps({
                     "setup": {
                         "model": f"models/{model}",
@@ -1625,10 +1743,20 @@ class App(ctk.CTk):
                         "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT}]},
                     }
                 }))
-                await ws.recv()  # setupComplete
 
-                self._log("[Live AI] Свързан и готов.")
-                self.live_status_label.configure(text="Свързан ✓", text_color="lightgreen")
+                first = await asyncio.wait_for(ws.recv(), timeout=20)
+                try:
+                    first_msg = json.loads(first)
+                except (json.JSONDecodeError, TypeError):
+                    first_msg = {"raw": str(first)[:300]}
+
+                if "setupComplete" not in first_msg:
+                    self._log(f"[Live AI] Сървърът отговори неочаквано: {first_msg}")
+                else:
+                    self._log("[Live AI] Setup потвърден от сървъра.")
+
+                self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
+                self._set_status(self.live_status_label, "Свързан ✓", "lightgreen")
 
                 await asyncio.gather(sender(ws), receiver(ws, out_stream))
 
@@ -1641,20 +1769,33 @@ class App(ctk.CTk):
 
         try:
             self.live_loop.run_until_complete(run())
+        except asyncio.TimeoutError:
+            self._log("[Live AI грешка] Сървърът не отговори на setup за 20 секунди.")
         except Exception as e:
-            self._log(f"[Live AI грешка] {e}")
-            self._log(
-                "[Съвет] Провери дали ключът е валиден, дали моделът съществува, "
-                "и дали не си достигнал лимита на безплатното ниво."
-            )
+            detail = str(e)
+            self._log(f"[Live AI грешка] {type(e).__name__}: {detail}")
+            if "1007" in detail or "1008" in detail or "policy" in detail.lower():
+                self._log(
+                    "[Съвет] Обикновено значи невалиден/спрян модел или проблем с ключа. "
+                    f"Пробвай друг модел от списъка (сега е '{model}')."
+                )
+            elif "401" in detail or "403" in detail or "API key" in detail:
+                self._log("[Съвет] Ключът изглежда невалиден. Провери го в таб 'AI'.")
+            elif "429" in detail:
+                self._log("[Съвет] Достигнат лимит на безплатното ниво. Изчакай малко.")
+            else:
+                self._log(
+                    "[Съвет] Провери интернет връзката и дали ключът е активен. "
+                    "Ползвай 'Тест връзка с Gemini' в таб 'Тест' за проверка."
+                )
             traceback.print_exc()
         finally:
             self.live_ws = None
             self.live_running = False
             self._stop_mic()
-            self.live_start_btn.configure(state="normal")
-            self.live_stop_btn.configure(state="disabled")
-            self.live_status_label.configure(text="Прекъснат.", text_color="gray")
+            self._set_btn(self.live_start_btn, "normal")
+            self._set_btn(self.live_stop_btn, "disabled")
+            self._set_status(self.live_status_label, "Прекъснат.", "gray")
 
     def _ai_worker(self):
         while True:
@@ -1665,7 +1806,8 @@ class App(ctk.CTk):
                 reply = call_gemini(api_key, model, nickname, comment)
                 if reply:
                     self._log(f"[AI] {reply}")
-                    self._enqueue_latest_only(reply)
+                    if self.ai_speak_var.get():
+                        self._enqueue_latest_only(reply)
             except GeminiError as e:
                 self._log(f"[AI грешка] {e}")
 
@@ -1899,7 +2041,7 @@ class App(ctk.CTk):
             async with websockets.connect(url) as ws:
                 self.tikfinity_ws = ws
                 self._log("[Система] Свързан към TikFinity. Изчакваме коментари...")
-                self.status_label.configure(text="На живо (през TikFinity)", text_color="lightgreen")
+                self._set_status(self.status_label, "На живо (през TikFinity)", "lightgreen")
 
                 async for raw_message in ws:
                     try:
@@ -1920,8 +2062,8 @@ class App(ctk.CTk):
         finally:
             self.tikfinity_ws = None
             self.is_running = False
-            self.start_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
+            self._set_btn(self.start_btn, "normal")
+            self._set_btn(self.stop_btn, "disabled")
 
     def _handle_tikfinity_event(self, msg: dict):
         event_name = msg.get("event")
@@ -1971,7 +2113,7 @@ class App(ctk.CTk):
         @client.on(ConnectEvent)
         async def on_connect(_event: ConnectEvent):
             self._log(f"[Система] Свързан към @{username}. Изчакваме коментари...")
-            self.status_label.configure(text=f"На живо: @{username}", text_color="lightgreen")
+            self._set_status(self.status_label, f"На живо: @{username}", "lightgreen")
 
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
@@ -2041,8 +2183,8 @@ class App(ctk.CTk):
             traceback.print_exc()
         finally:
             self.is_running = False
-            self.start_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
+            self._set_btn(self.start_btn, "normal")
+            self._set_btn(self.stop_btn, "disabled")
 
 
 if __name__ == "__main__":
