@@ -982,6 +982,13 @@ class App(ctk.CTk):
         self.live_every_n_entry.pack(side="left")
         ctk.CTkLabel(row, text="-ти").pack(side="left", padx=(6, 0))
 
+        row = self._row(tab)
+        self.live_feed_viewers_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            row, text="Брой зрители (на интервала от таб 'Глас')",
+            variable=self.live_feed_viewers_var,
+        ).pack(side="left")
+
         row = self._row(tab, "Групирай на всеки:")
         self.live_batch_seconds_entry = ctk.CTkEntry(row, width=70)
         self.live_batch_seconds_entry.insert(0, "8")
@@ -1373,7 +1380,7 @@ class App(ctk.CTk):
         "announce_follow_var", "announce_share_var", "announce_gift_var",
         "announce_viewers_var", "ai_enabled_var", "ai_speak_var",
         "live_feed_follow_var", "live_feed_share_var", "live_feed_gift_var",
-        "live_feed_comment_var", "live_autoreconnect_var",
+        "live_feed_comment_var", "live_feed_viewers_var", "live_autoreconnect_var",
     ]
     SETTINGS_MENUS = [
         "connection_mode", "output_mode", "voice_engine_menu", "voice_effect_menu",
@@ -1810,6 +1817,7 @@ class App(ctk.CTk):
         shares = [d for k, d in events if k == "share"]
         gifts = [d for k, d in events if k == "gift"]
         comments = [d for k, d in events if k == "comment"]
+        viewers = [d for k, d in events if k == "viewers"]
 
         parts = []
 
@@ -1846,6 +1854,10 @@ class App(ctk.CTk):
             else:
                 joined = " | ".join(comments[:6])
                 parts.append(f"{len(comments)} коментара в чата: {joined}")
+
+        if viewers:
+            # ползваме само последната стойност — старите вече не са актуални
+            parts.append(f"В момента гледат {viewers[-1]} души.")
 
         if not parts:
             return ""
@@ -2196,17 +2208,29 @@ class App(ctk.CTk):
             self._announce(f"{nickname} прати подарък {gn}!")
 
     def _on_viewer_count_event(self, viewer_count):
-        if not self.announce_viewers_var.get() or viewer_count is None:
+        if viewer_count is None:
             return
+
+        want_tts = self.announce_viewers_var.get()
+        want_live = self.live_running and self.live_feed_viewers_var.get()
+        if not want_tts and not want_live:
+            return
+
         raw = self.viewer_interval_entry.get().strip()
         try:
             interval = int(raw) if raw else 300
         except ValueError:
             interval = 300
+
         now = time.time()
-        if now - self.last_viewer_announcement_time >= max(interval, 10):
-            self.last_viewer_announcement_time = now
+        if now - self.last_viewer_announcement_time < max(interval, 10):
+            return
+        self.last_viewer_announcement_time = now
+
+        if want_tts:
             self._announce(f"В момента гледат {viewer_count} души.")
+        if want_live:
+            self._feed_live("viewers", str(viewer_count))
 
     # ------------------------------------------------------------------
     # Изговорчик (worker thread)
