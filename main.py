@@ -552,6 +552,8 @@ class App(ctk.CTk):
         self.live_text_queue: "queue.Queue" = queue.Queue()   # събития -> AI
         self.live_mic_queue: "queue.Queue" = queue.Queue()    # микрофон -> AI
         self.live_mic_stream = None
+        self.mic_active = False          # обикновен флаг — чете се от аудио нишката
+        self.mic_chunks_sent = 0
         self.live_comment_counter = 0
         # Групиране на събития: буфер + ключалка, за да не правим заявка за всяко събитие
         self.live_event_buffer = []
@@ -1940,23 +1942,42 @@ class App(ctk.CTk):
         try:
             import sounddevice as sd
             devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
         except Exception as e:
             self._log(f"[Микрофон] Не мога да прочета устройствата: {e}")
             return
 
+        # Windows показва всяко устройство по няколко пъти — веднъж за всеки
+        # звуков интерфейс (MME, DirectSound, WASAPI). Оставяме по един запис
+        # на физически микрофон, с предпочитание към по-модерния интерфейс.
+        priority = {"Windows WASAPI": 0, "Windows DirectSound": 1, "MME": 2}
+        best = {}
+        for idx, dev in enumerate(devices):
+            if dev.get("max_input_channels", 0) <= 0:
+                continue
+            name = dev["name"].strip()
+            try:
+                api_name = hostapis[dev["hostapi"]]["name"]
+            except Exception:
+                api_name = ""
+            rank = priority.get(api_name, 3)
+            if name not in best or rank < best[name][0]:
+                best[name] = (rank, idx, api_name)
+
         names = ["(по подразбиране)"]
         self.mic_device_map = {}
-        for idx, dev in enumerate(devices):
-            if dev.get("max_input_channels", 0) > 0:
-                label = f"{idx}: {dev['name']}"[:60]
-                names.append(label)
-                self.mic_device_map[label] = idx
+        for name, (_rank, idx, api_name) in sorted(best.items(), key=lambda x: x[1][1]):
+            label = name if len(name) <= 45 else name[:45] + "…"
+            if label in self.mic_device_map:      # съвсем еднакви имена
+                label = f"{label} ({idx})"
+            names.append(label)
+            self.mic_device_map[label] = idx
 
         current = self.mic_device_menu.get()
         self.mic_device_menu.configure(values=names)
         if current not in names:
             self.mic_device_menu.set("(по подразбиране)")
-        self._log(f"[Микрофон] Намерени {len(names) - 1} входни устройства.")
+        self._log(f"[Микрофон] {len(names) - 1} микрофона (дубликатите са премахнати).")
 
     def _get_selected_mic_device(self):
         label = self.mic_device_menu.get()
@@ -2029,22 +2050,28 @@ class App(ctk.CTk):
             return
 
         def callback(indata, frames, time_info, status):
-            if self.live_running and self.live_mic_var.get():
+            # ВАЖНО: тук НЕ четем tkinter променливи — този callback се изпълнява
+            # в аудио нишката на PortAudio и tkinter не е thread-safe.
+            if self.live_running and self.mic_active:
                 self.live_mic_queue.put(bytes(indata))
+                self.mic_chunks_sent += 1
 
         try:
             self.live_mic_stream = sd.RawInputStream(
                 samplerate=LIVE_INPUT_RATE, blocksize=1600, dtype="int16",
                 channels=1, callback=callback, device=self._get_selected_mic_device(),
             )
+            self.mic_active = True
+            self.mic_chunks_sent = 0
             self.live_mic_stream.start()
-            self._log("[Live AI] Микрофонът е включен.")
+            self._log("[Live AI] Микрофонът е включен — говори.")
         except Exception as e:
             self._log(f"[Live AI] Грешка при пускане на микрофона: {e}")
             self.live_mic_stream = None
             self.live_mic_var.set(False)
 
     def _stop_mic(self):
+        self.mic_active = False
         if self.live_mic_stream is not None:
             try:
                 self.live_mic_stream.stop()
@@ -2052,7 +2079,14 @@ class App(ctk.CTk):
             except Exception:
                 pass
             self.live_mic_stream = None
-            self._log("[Live AI] Микрофонът е изключен.")
+            secs = round(self.mic_chunks_sent * 0.1, 1)
+            if self.mic_chunks_sent == 0:
+                self._log(
+                    "[Live AI] Микрофонът е изключен — но НЕ е уловил нищо. "
+                    "Пусни '🎙 Тест микрофон' в таб 'Тест' и провери устройството."
+                )
+            else:
+                self._log(f"[Live AI] Микрофонът е изключен (изпратени ~{secs} сек. звук).")
 
     def _run_live_client(self, api_key: str):
         import base64
@@ -2077,10 +2111,10 @@ class App(ctk.CTk):
                         chunk = self.live_mic_queue.get_nowait()
                         await ws.send(json.dumps({
                             "realtimeInput": {
-                                "mediaChunks": [{
-                                    "mimeType": f"audio/pcm;rate={LIVE_INPUT_RATE}",
+                                "audio": {
                                     "data": base64.b64encode(chunk).decode("ascii"),
-                                }]
+                                    "mimeType": f"audio/pcm;rate={LIVE_INPUT_RATE}",
+                                }
                             }
                         }))
                         sent_something = True
@@ -2115,6 +2149,14 @@ class App(ctk.CTk):
                     continue
 
                 server_content = msg.get("serverContent") or {}
+
+                in_tr = (server_content.get("inputTranscription") or {}).get("text")
+                if in_tr:
+                    self._log(f"[Чух те] {in_tr}")
+                out_tr = (server_content.get("outputTranscription") or {}).get("text")
+                if out_tr:
+                    self._log(f"[AI казва] {out_tr}")
+
                 model_turn = server_content.get("modelTurn") or {}
                 for part in model_turn.get("parts", []):
                     inline = part.get("inlineData") or {}
@@ -2151,6 +2193,10 @@ class App(ctk.CTk):
                                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
                             },
                         },
+                        # Транскрипциите ни дават да видим в лога какво е чуло
+                        # AI-то и какво е казало — без тях се работи на сляпо.
+                        "inputAudioTranscription": {},
+                        "outputAudioTranscription": {},
                         "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT + streamer_line(streamer)}]},
                     }
                 }))
