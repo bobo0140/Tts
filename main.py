@@ -480,6 +480,16 @@ def enable_clipboard(widget):
     return widget
 
 
+# Цветова палитра
+ACCENT = "#7C5CFF"        # лилаво-синьо, основен акцент
+ACCENT_HOVER = "#6A4AE8"
+OK_COLOR = "#4ADE80"
+WARN_COLOR = "#FBBF24"
+ERR_COLOR = "#F87171"
+MUTED = "#8B8B99"
+CARD_BG = "#232330"
+BAR_BG = "#1C1C26"
+
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
@@ -526,11 +536,18 @@ class App(ctk.CTk):
         self.live_mic_queue: "queue.Queue" = queue.Queue()    # микрофон -> AI
         self.live_mic_stream = None
         self.live_comment_counter = 0
+        # Групиране на събития: буфер + ключалка, за да не правим заявка за всяко събитие
+        self.live_event_buffer = []
+        self.live_buffer_lock = threading.Lock()
 
         self._build_ui()
         self._enable_clipboard_everywhere()
+        self._load_settings()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(60000, self._autosave_settings)
 
         threading.Thread(target=self._ai_worker, daemon=True).start()
+        threading.Thread(target=self._live_batch_worker, daemon=True).start()
 
         try:
             pygame.mixer.init()
@@ -554,16 +571,23 @@ class App(ctk.CTk):
     def _section(self, parent, title, subtitle=None):
         """Заглавие на секция с разделител — за визуална подредба."""
         wrap = ctk.CTkFrame(parent, fg_color="transparent")
-        wrap.pack(fill="x", padx=4, pady=(14, 6))
+        wrap.pack(fill="x", padx=4, pady=(18, 8))
+
+        head = ctk.CTkFrame(wrap, fg_color="transparent")
+        head.pack(fill="x")
+        ctk.CTkFrame(head, width=4, height=20, fg_color=ACCENT, corner_radius=2).pack(
+            side="left", padx=(0, 10)
+        )
         ctk.CTkLabel(
-            wrap, text=title, font=ctk.CTkFont(size=14, weight="bold"), anchor="w"
-        ).pack(fill="x")
+            head, text=title, font=ctk.CTkFont(size=15, weight="bold"), anchor="w"
+        ).pack(side="left")
+
         if subtitle:
             ctk.CTkLabel(
-                wrap, text=subtitle, font=ctk.CTkFont(size=11), text_color="gray",
-                anchor="w", justify="left", wraplength=620,
-            ).pack(fill="x", pady=(2, 0))
-        ctk.CTkFrame(wrap, height=1, fg_color="gray30").pack(fill="x", pady=(6, 0))
+                wrap, text=subtitle, font=ctk.CTkFont(size=11), text_color=MUTED,
+                anchor="w", justify="left", wraplength=640,
+            ).pack(fill="x", padx=(14, 0), pady=(4, 0))
+        ctk.CTkFrame(wrap, height=1, fg_color="gray25").pack(fill="x", pady=(8, 0))
         return wrap
 
     def _row(self, parent, label_text=None, label_width=200):
@@ -576,52 +600,73 @@ class App(ctk.CTk):
 
     def _hint(self, parent, text):
         ctk.CTkLabel(
-            parent, text=text, font=ctk.CTkFont(size=11), text_color="gray",
+            parent, text=text, font=ctk.CTkFont(size=11), text_color=MUTED,
             anchor="w", justify="left", wraplength=620,
         ).pack(fill="x", padx=4, pady=(2, 6))
 
     def _build_ui(self):
         # ---------------- Лента за състояние (винаги видима) ----------------
-        bar = ctk.CTkFrame(self, height=44)
-        bar.pack(fill="x", padx=12, pady=(12, 6))
+        bar = ctk.CTkFrame(self, height=62, fg_color=BAR_BG, corner_radius=12)
+        bar.pack(fill="x", padx=14, pady=(14, 8))
+        bar.pack_propagate(False)
 
+        brand = ctk.CTkFrame(bar, fg_color="transparent")
+        brand.pack(side="left", padx=(18, 22))
         ctk.CTkLabel(
-            bar, text="TikTok TTS", font=ctk.CTkFont(size=16, weight="bold")
-        ).pack(side="left", padx=(14, 18))
+            brand, text="TikTok TTS", font=ctk.CTkFont(size=18, weight="bold"), anchor="w"
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            brand, text="глас и AI за твоя лайв", font=ctk.CTkFont(size=10),
+            text_color=MUTED, anchor="w",
+        ).pack(anchor="w")
 
         self.status_label = ctk.CTkLabel(
-            bar, text="● Подготовка на гласа...", text_color="orange"
+            bar, text="● Подготовка на гласа...", text_color=WARN_COLOR,
+            font=ctk.CTkFont(size=12, weight="bold"),
         )
-        self.status_label.pack(side="left", padx=(0, 18))
+        self.status_label.pack(side="left", padx=(0, 20))
 
-        self.live_status_label = ctk.CTkLabel(bar, text="○ Live AI изключен", text_color="gray")
+        self.live_status_label = ctk.CTkLabel(
+            bar, text="○ Live AI изключен", text_color=MUTED, font=ctk.CTkFont(size=12)
+        )
         self.live_status_label.pack(side="left")
 
-        self.start_btn = ctk.CTkButton(bar, text="▶ Старт", width=100, command=self.start_listening)
-        self.start_btn.pack(side="right", padx=(8, 14), pady=8)
-        self.stop_btn = ctk.CTkButton(
-            bar, text="■ Стоп", width=90, state="disabled", fg_color="gray30",
-            hover_color="gray25", command=self.stop_listening,
+        self.start_btn = ctk.CTkButton(
+            bar, text="▶  Старт", width=110, height=36, corner_radius=8,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self.start_listening,
         )
-        self.stop_btn.pack(side="right", pady=8)
+        self.start_btn.pack(side="right", padx=(10, 18))
+        self.stop_btn = ctk.CTkButton(
+            bar, text="■  Стоп", width=100, height=36, corner_radius=8, state="disabled",
+            fg_color="transparent", border_width=1, border_color="gray40",
+            hover_color="gray25", text_color=MUTED, command=self.stop_listening,
+        )
+        self.stop_btn.pack(side="right")
 
         # ---------------- Режим на изхода ----------------
-        mode_bar = ctk.CTkFrame(self)
-        mode_bar.pack(fill="x", padx=12, pady=(0, 6))
+        mode_bar = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=10)
+        mode_bar.pack(fill="x", padx=14, pady=(0, 10))
         ctk.CTkLabel(
-            mode_bar, text="Кой говори:", font=ctk.CTkFont(size=12, weight="bold")
-        ).pack(side="left", padx=(14, 10), pady=8)
+            mode_bar, text="Кой говори", font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(side="left", padx=(18, 14), pady=10)
         self.output_mode = ctk.CTkSegmentedButton(
             mode_bar,
-            values=["Само TTS гласове", "Само AI", "И двете"],
+            values=["TTS гласове", "Само Live AI", "И двете"],
+            height=32, font=ctk.CTkFont(size=12),
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
             command=self._on_output_mode_changed,
         )
-        self.output_mode.set("Само TTS гласове")
-        self.output_mode.pack(side="left", fill="x", expand=True, padx=(0, 14), pady=8)
+        self.output_mode.set("TTS гласове")
+        self.output_mode.pack(side="left", fill="x", expand=True, padx=(0, 18), pady=10)
 
         # ---------------- Табове ----------------
-        self.tabview = ctk.CTkTabview(self, anchor="w")
-        self.tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.tabview = ctk.CTkTabview(
+            self, anchor="w", corner_radius=12,
+            segmented_button_selected_color=ACCENT,
+            segmented_button_selected_hover_color=ACCENT_HOVER,
+        )
+        self.tabview.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
         t_home = ctk.CTkScrollableFrame(self.tabview.add("  Начало  "), fg_color="transparent")
         t_filters = ctk.CTkScrollableFrame(self.tabview.add("  Филтри  "), fg_color="transparent")
@@ -672,7 +717,10 @@ class App(ctk.CTk):
         )
 
         self._section(tab, "Лог", "Тук виждаш всичко: коментари, филтри, AI отговори, грешки.")
-        self.log_box = ctk.CTkTextbox(tab, wrap="word", height=280)
+        self.log_box = ctk.CTkTextbox(
+            tab, wrap="word", height=300, corner_radius=8, fg_color=CARD_BG,
+            font=ctk.CTkFont(family="Consolas", size=12),
+        )
         self.log_box.pack(fill="both", expand=True, padx=4, pady=(0, 8))
         self.log_box.configure(state="disabled")
 
@@ -788,8 +836,10 @@ class App(ctk.CTk):
         self._hint(tab, "Ефектите работят само за Dimitar — другите два гласа идват готови от облака.")
 
         ctk.CTkButton(
-            tab, text="🔊 Пробвай гласа", command=self._preview_voice, width=170
-        ).pack(anchor="w", padx=8, pady=(4, 10))
+            tab, text="🔊  Пробвай гласа", command=self._preview_voice, width=180, height=36,
+            corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(6, 12))
 
         self._section(tab, "Гласови обявявания", "Освен коментарите, какво друго да казва на глас.")
 
@@ -877,7 +927,11 @@ class App(ctk.CTk):
         )
 
         row = self._row(tab)
-        self.live_start_btn = ctk.CTkButton(row, text="Свържи Live AI", command=self.start_live_ai, width=150)
+        self.live_start_btn = ctk.CTkButton(
+            row, text="Свържи Live AI", command=self.start_live_ai, width=160, height=36,
+            corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        )
         self.live_start_btn.pack(side="left", padx=(0, 8))
         self.live_stop_btn = ctk.CTkButton(
             row, text="Спри", command=self.stop_live_ai, state="disabled", width=100,
@@ -927,6 +981,18 @@ class App(ctk.CTk):
         self.live_every_n_entry.insert(0, "5")
         self.live_every_n_entry.pack(side="left")
         ctk.CTkLabel(row, text="-ти").pack(side="left", padx=(6, 0))
+
+        row = self._row(tab, "Групирай на всеки:")
+        self.live_batch_seconds_entry = ctk.CTkEntry(row, width=70)
+        self.live_batch_seconds_entry.insert(0, "8")
+        self.live_batch_seconds_entry.pack(side="left")
+        ctk.CTkLabel(row, text="секунди").pack(side="left", padx=(6, 0))
+        self._hint(
+            tab,
+            "Събитията се трупат и се пращат наведнъж. Ако 20 души те последват за "
+            "20 секунди, това е ЕДНА заявка вместо 20 — пести лимита и AI-то реагира "
+            "смислено ('20 нови последователи!'), вместо да ги изрежда едно по едно.",
+        )
 
         self._section(tab, "Микрофон", "За да те слуша Live AI-то и да ти отговаря.")
 
@@ -994,20 +1060,59 @@ class App(ctk.CTk):
             )
         grid.grid_columnconfigure((0, 1), weight=1)
 
-        self._section(tab, "AI тестове", "Изискват Gemini ключ в таб 'AI'. Започни с проверката на връзката.")
+        self._section(tab, "AI тестове", "Изискват Gemini ключ. Започни с проверката на връзката.")
 
         ai_grid = ctk.CTkFrame(tab, fg_color="transparent")
-        ai_grid.pack(fill="x", padx=4, pady=(4, 12))
+        ai_grid.pack(fill="x", padx=4, pady=(4, 6))
         ai_tests = [
             ("🔌 Тест връзка с Gemini", self._test_gemini_connection),
             ("🤖 Тест AI коментатор", self._test_ai_commentator),
-            ("🎙 Изпрати към Live AI", self._test_live_feed),
+            ("🎙 Тест микрофон (3 сек)", self._test_microphone),
+            ("📡 Изпрати към Live AI", self._test_live_feed),
         ]
         for i, (text, cmd) in enumerate(ai_tests):
-            ctk.CTkButton(ai_grid, text=text, command=cmd, width=200).grid(
+            ctk.CTkButton(ai_grid, text=text, command=cmd, height=34).grid(
                 row=i // 2, column=i % 2, padx=6, pady=5, sticky="ew"
             )
         ai_grid.grid_columnconfigure((0, 1), weight=1)
+
+        self._section(
+            tab, "Симулатор на наплив",
+            "Симулира какво става, когато много хора реагират наведнъж — точно случаят, "
+            "заради който групираме заявките.",
+        )
+
+        row = self._row(tab, "Брой събития:", label_width=150)
+        self.burst_count_entry = ctk.CTkEntry(row, width=80)
+        self.burst_count_entry.insert(0, "10")
+        self.burst_count_entry.pack(side="left")
+        ctk.CTkLabel(row, text="(макс. 50)", text_color="gray").pack(side="left", padx=(8, 0))
+
+        burst_grid = ctk.CTkFrame(tab, fg_color="transparent")
+        burst_grid.pack(fill="x", padx=4, pady=(4, 14))
+        bursts = [
+            ("👥 Наплив последователи", self._test_burst_follows),
+            ("🔁 Наплив споделяния", self._test_burst_shares),
+            ("🌹 Наплив подаръци", self._test_burst_gifts),
+            ("💬 Наплив коментари", self._test_burst_comments),
+        ]
+        for i, (text, cmd) in enumerate(bursts):
+            ctk.CTkButton(burst_grid, text=text, command=cmd, height=34).grid(
+                row=i // 2, column=i % 2, padx=6, pady=5, sticky="ew"
+            )
+        burst_grid.grid_columnconfigure((0, 1), weight=1)
+
+        self._section(tab, "Настройки")
+        srow = ctk.CTkFrame(tab, fg_color="transparent")
+        srow.pack(fill="x", padx=4, pady=(4, 14))
+        ctk.CTkButton(
+            srow, text="💾 Запази настройките сега", command=self._save_settings, height=34
+        ).pack(side="left", padx=(0, 8))
+        self._hint(
+            tab,
+            "Настройките се запазват автоматично при затваряне и на всяка минута, "
+            "във файл settings.json до приложението.",
+        )
 
     # ------------------------------------------------------------------
     # Тестови симулации
@@ -1120,7 +1225,84 @@ class App(ctk.CTk):
             return
         name = self._test_name()
         self._log("--- ТЕСТ: съобщение към Live AI ---")
-        self._feed_live(f"Нов последовател: {name}. Поздрави го кратко.")
+        self._feed_live("follow", name)
+
+    def _test_microphone(self):
+        """Записва 3 секунди от микрофона и показва дали изобщо влиза звук."""
+        self._log("--- ТЕСТ: микрофон (3 секунди, говори сега) ---")
+
+        def worker():
+            try:
+                import sounddevice as sd
+            except Exception as e:
+                self._log(f"[Тест] Микрофонът не е достъпен: {e}")
+                return
+            try:
+                device = self._get_selected_mic_device()
+                rec = sd.rec(
+                    int(3 * LIVE_INPUT_RATE), samplerate=LIVE_INPUT_RATE,
+                    channels=1, dtype="int16", device=device,
+                )
+                sd.wait()
+            except Exception as e:
+                self._log(f"[Тест] Грешка при запис: {e}")
+                return
+
+            peak = int(np.abs(rec).max())
+            pct = round(peak / 32767 * 100)
+            if peak < 300:
+                self._log(
+                    f"[Тест] Не чувам нищо (пик {pct}%). Провери дали е избран правилният "
+                    "микрофон и дали не е заглушен в Windows."
+                )
+            elif peak < 2000:
+                self._log(f"[Тест] Чувам те слабо (пик {pct}%). Усили микрофона в Windows.")
+            else:
+                self._log(f"[Тест] ✓ Микрофонът работи добре (пик {pct}%).")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_burst_follows(self):
+        n = self._burst_count()
+        self._log(f"--- СИМУЛАТОР: {n} последователи наведнъж ---")
+        for i in range(n):
+            self._on_follow_event(f"Потребител{i + 1}")
+
+    def _test_burst_shares(self):
+        n = self._burst_count()
+        self._log(f"--- СИМУЛАТОР: {n} споделяния ---")
+        for i in range(n):
+            key = f"burst_share_{i}"
+            self.announced_sharers.discard(key)
+            self._on_share_event(f"Споделящ{i + 1}", key)
+
+    def _test_burst_gifts(self):
+        n = self._burst_count()
+        self._log(f"--- СИМУЛАТОР: {n} подаръка (рози) ---")
+        for i in range(n):
+            self._on_gift_shoutout(self._test_name(), "Роза")
+
+    def _test_burst_comments(self):
+        n = self._burst_count()
+        self._log(f"--- СИМУЛАТОР: {n} различни коментара ---")
+        samples = [
+            "Zdravei kak si", "Много добър стрийм!", "Kakvo igraesh",
+            "Поздрави от Пловдив", "haide oshte edna igra", "Браво!",
+            "kak se kazva pesenta", "Първи път гледам",
+        ]
+        self.spam_filter_var.set(False)  # иначе анти-спамът ще ги реже
+        for i in range(n):
+            self._process_incoming_comment(
+                f"Зрител{i + 1}", f"burst_user_{i}", samples[i % len(samples)], False
+            )
+        self._log("[Симулатор] (Анти-спамът е временно изключен за този тест.)")
+
+    def _burst_count(self) -> int:
+        raw = self.burst_count_entry.get().strip()
+        try:
+            return max(1, min(int(raw), 50)) if raw else 10
+        except ValueError:
+            return 10
 
     def _test_reset(self):
         self.announced_sharers.clear()
@@ -1175,6 +1357,132 @@ class App(ctk.CTk):
         walk(self)
         return count
 
+    # ==================================================================
+    # Запазване и зареждане на настройките
+    # ==================================================================
+    SETTINGS_ENTRIES = [
+        "username_entry", "api_key_entry", "tikfinity_url_entry", "filter_entry",
+        "max_chars_entry", "max_name_len_entry", "viewer_interval_entry",
+        "gemini_api_key_entry", "ai_every_n_entry", "live_every_n_entry",
+        "live_batch_seconds_entry", "hotkey_entry", "test_name_entry",
+        "test_comment_entry",
+    ]
+    SETTINGS_BOOLS = [
+        "filter_var", "strip_mentions_var", "shlyokavitsa_var", "spam_filter_var",
+        "heart_me_filter_var", "skip_instead_of_truncate_var", "voice_shuffle_var",
+        "announce_follow_var", "announce_share_var", "announce_gift_var",
+        "announce_viewers_var", "ai_enabled_var", "ai_speak_var",
+        "live_feed_follow_var", "live_feed_share_var", "live_feed_gift_var",
+        "live_feed_comment_var", "live_autoreconnect_var",
+    ]
+    SETTINGS_MENUS = [
+        "connection_mode", "output_mode", "voice_engine_menu", "voice_effect_menu",
+        "gemini_model_entry", "ai_frequency_menu", "live_model_entry",
+        "live_voice_menu", "mic_device_menu", "hotkey_mode_menu",
+    ]
+    SETTINGS_SLIDERS = ["speed_slider", "expressiveness_slider", "volume_slider"]
+
+    def _settings_path(self) -> Path:
+        return BASE_DIR / "settings.json"
+
+    def _save_settings(self, silent: bool = False):
+        data = {"entries": {}, "bools": {}, "menus": {}, "sliders": {}, "shuffle": {}}
+        try:
+            for name in self.SETTINGS_ENTRIES:
+                w = getattr(self, name, None)
+                if w is not None:
+                    data["entries"][name] = w.get()
+            for name in self.SETTINGS_BOOLS:
+                v = getattr(self, name, None)
+                if v is not None:
+                    data["bools"][name] = bool(v.get())
+            for name in self.SETTINGS_MENUS:
+                w = getattr(self, name, None)
+                if w is not None:
+                    data["menus"][name] = w.get()
+            for name in self.SETTINGS_SLIDERS:
+                w = getattr(self, name, None)
+                if w is not None:
+                    data["sliders"][name] = float(w.get())
+            for key, var in getattr(self, "shuffle_vars", {}).items():
+                data["shuffle"][key] = bool(var.get())
+
+            self._settings_path().write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            if not silent:
+                self._log(f"[Настройки] Запазени в {self._settings_path().name}")
+        except Exception as e:
+            if not silent:
+                self._log(f"[Настройки] Грешка при запазване: {e}")
+
+    def _load_settings(self):
+        path = self._settings_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._log(f"[Настройки] Не мога да прочета {path.name}: {e}")
+            return
+
+        for name, value in data.get("entries", {}).items():
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
+                    w.delete(0, "end")
+                    w.insert(0, value)
+                except Exception:
+                    pass
+        for name, value in data.get("bools", {}).items():
+            v = getattr(self, name, None)
+            if v is not None:
+                try:
+                    v.set(bool(value))
+                except Exception:
+                    pass
+        for name, value in data.get("menus", {}).items():
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
+                    w.set(value)
+                except Exception:
+                    pass
+        for name, value in data.get("sliders", {}).items():
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
+                    w.set(float(value))
+                except Exception:
+                    pass
+        for key, value in data.get("shuffle", {}).items():
+            var = getattr(self, "shuffle_vars", {}).get(key)
+            if var is not None:
+                try:
+                    var.set(bool(value))
+                except Exception:
+                    pass
+
+        # прилагаме заредения режим на свързване (показва/скрива правилните полета)
+        try:
+            self._on_connection_mode_changed(self.connection_mode.get())
+        except Exception:
+            pass
+
+        self._log("[Настройки] Заредени от предишния път.")
+
+    def _autosave_settings(self):
+        self._save_settings(silent=True)
+        self.after(60000, self._autosave_settings)
+
+    def _on_close(self):
+        self._save_settings(silent=True)
+        try:
+            self._unregister_hotkey()
+        except Exception:
+            pass
+        self.destroy()
+
     def _clear_log(self):
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
@@ -1219,10 +1527,10 @@ class App(ctk.CTk):
                 self._log("[Система] Гласът е свален успешно.")
 
             self.voice = PiperVoice.load(str(MODEL_PATH), str(CONFIG_PATH))
-            self._set_status(self.status_label, "● Готов", "lightgreen")
+            self._set_status(self.status_label, "● Готов", OK_COLOR)
         except Exception as e:
             self._log(f"[Грешка при зареждане на гласа] {e}")
-            self._set_status(self.status_label, "● Грешка с гласа — виж лога", "red")
+            self._set_status(self.status_label, "● Грешка с гласа — виж лога", ERR_COLOR)
 
     # ------------------------------------------------------------------
     # Филтър
@@ -1295,22 +1603,26 @@ class App(ctk.CTk):
         return cut.strip()
 
     def _on_output_mode_changed(self, value: str):
-        if value == "Само AI":
-            self._log("[Режим] Само AI — обикновените TTS гласове са заглушени.")
-        elif value == "Само TTS гласове":
-            self._log("[Режим] Само TTS — AI отговорите няма да се четат на глас.")
+        if value == "Само Live AI":
+            self._log(
+                "[Режим] Само Live AI — локалните гласове (вкл. четенето на AI текста) "
+                "са заглушени. Чува се само гласът на Gemini."
+            )
+        elif value == "TTS гласове":
+            self._log("[Режим] TTS гласове — Dimitar/Borislav/Kalina четат всичко.")
         else:
-            self._log("[Режим] И двете — TTS и AI говорят заедно.")
+            self._log("[Режим] И двете — локалните гласове и Live AI говорят заедно.")
 
     def _speech_allowed(self, source: str) -> bool:
-        """Решава дали даден източник има право да говори според режима.
-        source: 'tts' (коментари и обявявания) или 'ai' (Gemini отговори)."""
+        """Дали даден източник има право да ползва ЛОКАЛНИЯ глас (Piper/Edge).
+        Live AI не минава оттук — то си пуска аудиото директно.
+        source: 'tts' (коментари/обявявания) или 'ai' (текст от Gemini)."""
         mode = self.output_mode.get()
+        if mode == "Само Live AI":
+            return False  # нищо локално не говори — само гласът на Gemini
         if mode == "И двете":
             return True
-        if mode == "Само AI":
-            return source == "ai"
-        return source == "tts"  # "Само TTS гласове"
+        return True  # "TTS гласове"
 
     def _enqueue_latest_only(self, text: str, source: str = "tts"):
         # Режимът решава дали този източник изобщо има право да говори.
@@ -1375,7 +1687,7 @@ class App(ctk.CTk):
                 self.heart_me_senders.add(user_key)
                 self._log(f"[Система] {nickname} прати Heart Me — вече е допустим.")
                 if self.live_running and self.live_feed_gift_var.get():
-                    self._feed_live(f"{nickname} прати Heart Me подарък! Благодари му топло.")
+                    self._feed_live("gift", f"{nickname} — Heart Me")
 
     def _announce(self, text: str):
         """Пуска системно съобщение за изговаряне (нов последовател, споделяне и т.н.)."""
@@ -1424,7 +1736,7 @@ class App(ctk.CTk):
         if self.live_comment_counter % n != 0:
             return
 
-        self._feed_live(f'Зрителят "{nickname}" написа в чата: "{comment}". Реагирай кратко.')
+        self._feed_live("comment", f'{nickname}: "{comment}"')
 
     # ------------------------------------------------------------------
     # Live AI (Gemini Live API) — говор-към-говор
@@ -1458,10 +1770,90 @@ class App(ctk.CTk):
         self.live_stop_btn.configure(state="disabled")
         self.live_status_label.configure(text="○ Live AI изключен", text_color="gray")
 
-    def _feed_live(self, text: str):
-        """Подава текстово събитие на Live AI-то (ако е свързано)."""
-        if self.live_running:
-            self.live_text_queue.put(text)
+    def _feed_live(self, kind: str, detail: str):
+        """Слага събитие в буфера вместо да праща веднага.
+        Така 20 последователи за 20 секунди стават ЕДНА заявка, не 20.
+        kind: 'follow' | 'share' | 'gift' | 'comment'"""
+        if not self.live_running:
+            return
+        with self.live_buffer_lock:
+            self.live_event_buffer.append((kind, detail))
+
+    def _live_batch_worker(self):
+        """Периодично събира натрупаните събития в едно съобщение и го праща."""
+        while True:
+            try:
+                interval = max(2, int(self.live_batch_seconds_entry.get().strip() or 8))
+            except (ValueError, AttributeError):
+                interval = 8
+
+            time.sleep(interval)
+
+            if not self.live_running:
+                continue
+
+            with self.live_buffer_lock:
+                events = self.live_event_buffer[:]
+                self.live_event_buffer.clear()
+
+            if not events:
+                continue
+
+            message = self._compose_batch_message(events)
+            if message:
+                self.live_text_queue.put(message)
+                self._log(f"[Live AI ->] ({len(events)} събития в 1 заявка)")
+
+    def _compose_batch_message(self, events) -> str:
+        """Съединява събитията в едно кратко, четимо резюме за AI-то."""
+        follows = [d for k, d in events if k == "follow"]
+        shares = [d for k, d in events if k == "share"]
+        gifts = [d for k, d in events if k == "gift"]
+        comments = [d for k, d in events if k == "comment"]
+
+        parts = []
+
+        if follows:
+            if len(follows) == 1:
+                parts.append(f"Нов последовател: {follows[0]}.")
+            else:
+                names = ", ".join(follows[:8])
+                extra = f" и още {len(follows) - 8}" if len(follows) > 8 else ""
+                parts.append(f"{len(follows)} нови последователи: {names}{extra}.")
+
+        if shares:
+            if len(shares) == 1:
+                parts.append(f"{shares[0]} сподели стрийма.")
+            else:
+                parts.append(f"{len(shares)} души споделиха стрийма: {', '.join(shares[:8])}.")
+
+        if gifts:
+            if len(gifts) == 1:
+                parts.append(f"Подарък: {gifts[0]}.")
+            else:
+                # групираме еднаквите подаръци: "Иван x12 Роза"
+                counts = {}
+                for g in gifts:
+                    counts[g] = counts.get(g, 0) + 1
+                summary = ", ".join(
+                    f"{g} (x{c})" if c > 1 else g for g, c in list(counts.items())[:8]
+                )
+                parts.append(f"Подаръци: {summary}.")
+
+        if comments:
+            if len(comments) == 1:
+                parts.append(f"Коментар в чата — {comments[0]}")
+            else:
+                joined = " | ".join(comments[:6])
+                parts.append(f"{len(comments)} коментара в чата: {joined}")
+
+        if not parts:
+            return ""
+
+        return (
+            " ".join(parts)
+            + " Реагирай общо и кратко на всичко това наведнъж, в едно изказване."
+        )
 
     def _on_mic_toggle(self):
         if self.live_mic_var.get():
@@ -1699,7 +2091,7 @@ class App(ctk.CTk):
                     self._log("[Live AI] Setup потвърден от сървъра.")
 
                 self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
-                self._set_status(self.live_status_label, "● Live AI активен", "lightgreen")
+                self._set_status(self.live_status_label, "● Live AI активен", OK_COLOR)
 
                 await asyncio.gather(sender(ws), receiver(ws, out_stream))
 
@@ -1768,7 +2160,7 @@ class App(ctk.CTk):
 
     def _on_follow_event(self, nickname: str):
         if self.live_running and self.live_feed_follow_var.get():
-            self._feed_live(f"Нов последовател: {nickname}. Поздрави го.")
+            self._feed_live("follow", nickname)
         if self.announce_follow_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
             self._announce(f"{nickname} последва канала!")
 
@@ -1780,7 +2172,7 @@ class App(ctk.CTk):
             self.announced_sharers.add(user_key)
 
         if self.live_running and self.live_feed_share_var.get():
-            self._feed_live(f"{nickname} току-що сподели стрийма. Благодари му.")
+            self._feed_live("share", nickname)
 
         if not self.announce_share_var.get():
             return
@@ -1794,7 +2186,7 @@ class App(ctk.CTk):
             return  # Heart Me си има собствена логика, не го обявяваме отделно
 
         if self.live_running and self.live_feed_gift_var.get() and gn:
-            self._feed_live(f"{nickname} прати подарък {gn}. Благодари му кратко.")
+            self._feed_live("gift", f"{nickname} — {gn}")
 
         if (
             self.announce_gift_var.get()
@@ -2001,7 +2393,7 @@ class App(ctk.CTk):
             async with websockets.connect(url) as ws:
                 self.tikfinity_ws = ws
                 self._log("[Система] Свързан към TikFinity. Изчакваме коментари...")
-                self._set_status(self.status_label, "● На живо (TikFinity)", "lightgreen")
+                self._set_status(self.status_label, "● На живо (TikFinity)", OK_COLOR)
 
                 async for raw_message in ws:
                     try:
@@ -2073,7 +2465,7 @@ class App(ctk.CTk):
         @client.on(ConnectEvent)
         async def on_connect(_event: ConnectEvent):
             self._log(f"[Система] Свързан към @{username}. Изчакваме коментари...")
-            self._set_status(self.status_label, f"● На живо: @{username}", "lightgreen")
+            self._set_status(self.status_label, f"● На живо: @{username}", OK_COLOR)
 
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
