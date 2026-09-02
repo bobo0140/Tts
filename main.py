@@ -332,6 +332,14 @@ LIVE_OUTPUT_RATE = 24000  # и връща 24kHz изход
 
 # Актуални Live модели за Gemini Developer API.
 # ВНИМАНИЕ: gemini-live-2.5-flash-preview беше спрян на 09.12.2025 — не го ползвай.
+# Текстови модели за AI коментатора.
+# ВНИМАНИЕ: gemini-2.5-flash-lite вече не се дава на нови потребители.
+TEXT_MODELS = [
+    "gemini-3.5-flash-lite",   # най-евтин и бърз, препоръчан
+    "gemini-3.1-flash",
+    "gemini-3.5-flash",
+]
+
 LIVE_MODELS = [
     "gemini-3.1-flash-live-preview",                  # препоръчан от Google
     "gemini-2.5-flash-native-audio-preview-12-2025",
@@ -481,8 +489,8 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("TikTok Live TTS Reader (BG)")
-        self.geometry("640x560")
-        self.minsize(560, 480)
+        self.geometry("900x760")
+        self.minsize(780, 620)
 
         self.voice: PiperVoice | None = None
         self.speech_queue: "queue.Queue[str]" = queue.Queue()
@@ -540,560 +548,448 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
-    def _build_ui(self):
-        pad = {"padx": 14, "pady": 8}
+    # ==================================================================
+    # Интерфейс
+    # ==================================================================
+    def _section(self, parent, title, subtitle=None):
+        """Заглавие на секция с разделител — за визуална подредба."""
+        wrap = ctk.CTkFrame(parent, fg_color="transparent")
+        wrap.pack(fill="x", padx=4, pady=(14, 6))
+        ctk.CTkLabel(
+            wrap, text=title, font=ctk.CTkFont(size=14, weight="bold"), anchor="w"
+        ).pack(fill="x")
+        if subtitle:
+            ctk.CTkLabel(
+                wrap, text=subtitle, font=ctk.CTkFont(size=11), text_color="gray",
+                anchor="w", justify="left", wraplength=620,
+            ).pack(fill="x", pady=(2, 0))
+        ctk.CTkFrame(wrap, height=1, fg_color="gray30").pack(fill="x", pady=(6, 0))
+        return wrap
 
-        mode_frame = ctk.CTkFrame(self)
-        mode_frame.pack(fill="x", **pad)
-        ctk.CTkLabel(mode_frame, text="Начин на свързване:").pack(side="left", padx=(0, 8))
+    def _row(self, parent, label_text=None, label_width=200):
+        """Един ред в секция, по избор със заглавие вляво."""
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", padx=4, pady=5)
+        if label_text:
+            ctk.CTkLabel(row, text=label_text, width=label_width, anchor="w").pack(side="left")
+        return row
+
+    def _hint(self, parent, text):
+        ctk.CTkLabel(
+            parent, text=text, font=ctk.CTkFont(size=11), text_color="gray",
+            anchor="w", justify="left", wraplength=620,
+        ).pack(fill="x", padx=4, pady=(2, 6))
+
+    def _build_ui(self):
+        # ---------------- Лента за състояние (винаги видима) ----------------
+        bar = ctk.CTkFrame(self, height=44)
+        bar.pack(fill="x", padx=12, pady=(12, 6))
+
+        ctk.CTkLabel(
+            bar, text="TikTok TTS", font=ctk.CTkFont(size=16, weight="bold")
+        ).pack(side="left", padx=(14, 18))
+
+        self.status_label = ctk.CTkLabel(
+            bar, text="● Подготовка на гласа...", text_color="orange"
+        )
+        self.status_label.pack(side="left", padx=(0, 18))
+
+        self.live_status_label = ctk.CTkLabel(bar, text="○ Live AI изключен", text_color="gray")
+        self.live_status_label.pack(side="left")
+
+        self.start_btn = ctk.CTkButton(bar, text="▶ Старт", width=100, command=self.start_listening)
+        self.start_btn.pack(side="right", padx=(8, 14), pady=8)
+        self.stop_btn = ctk.CTkButton(
+            bar, text="■ Стоп", width=90, state="disabled", fg_color="gray30",
+            hover_color="gray25", command=self.stop_listening,
+        )
+        self.stop_btn.pack(side="right", pady=8)
+
+        # ---------------- Табове ----------------
+        self.tabview = ctk.CTkTabview(self, anchor="w")
+        self.tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        t_home = ctk.CTkScrollableFrame(self.tabview.add("  Начало  "), fg_color="transparent")
+        t_filters = ctk.CTkScrollableFrame(self.tabview.add("  Филтри  "), fg_color="transparent")
+        t_voice = ctk.CTkScrollableFrame(self.tabview.add("  Глас  "), fg_color="transparent")
+        t_ai = ctk.CTkScrollableFrame(self.tabview.add("  AI  "), fg_color="transparent")
+        t_test = ctk.CTkScrollableFrame(self.tabview.add("  Тест  "), fg_color="transparent")
+        for f in (t_home, t_filters, t_voice, t_ai, t_test):
+            f.pack(fill="both", expand=True)
+
+        self._build_home_tab(t_home)
+        self._build_filters_tab(t_filters)
+        self._build_voice_tab(t_voice)
+        self._build_ai_tab(t_ai)
+        self._build_test_tab(t_test)
+
+    # ------------------------------------------------------------------
+    def _build_home_tab(self, tab):
+        self._section(tab, "Връзка с TikTok", "Директно или през TikFinity, ако имаш проблеми.")
+
+        row = self._row(tab, "Начин на свързване:")
         self.connection_mode = ctk.CTkSegmentedButton(
-            mode_frame,
-            values=["Директно (TikTok)", "TikFinity (Advanced)"],
+            row, values=["Директно (TikTok)", "TikFinity (Advanced)"],
             command=self._on_connection_mode_changed,
         )
         self.connection_mode.set("Директно (TikTok)")
         self.connection_mode.pack(side="left", fill="x", expand=True)
 
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=14, pady=(0, 14))
-        tab_main = self.tabview.add("Основно")
-        tab_filters = self.tabview.add("Филтри")
-        tab_events = self.tabview.add("Събития")
-        tab_voice = self.tabview.add("Глас")
-        tab_ai = self.tabview.add("AI")
-        tab_live = self.tabview.add("Live AI")
-        tab_test = self.tabview.add("Тест")
-
-        # ---------------- Таб "Основно" ----------------
-        top = ctk.CTkFrame(tab_main)
-        top.pack(fill="x", **pad)
-        self.direct_username_frame = top
-
-        ctk.CTkLabel(top, text="TikTok потребителско име:").pack(side="left", padx=(0, 8))
-        self.username_entry = ctk.CTkEntry(top, placeholder_text="напр. someusername (без @)")
+        self.direct_username_frame = self._row(tab, "TikTok потребител:")
+        self.username_entry = ctk.CTkEntry(
+            self.direct_username_frame, placeholder_text="напр. someusername (без @)"
+        )
         self.username_entry.pack(side="left", fill="x", expand=True)
 
-        key_frame = ctk.CTkFrame(tab_main)
-        key_frame.pack(fill="x", **pad)
-        self.direct_api_key_frame = key_frame
-        ctk.CTkLabel(key_frame, text="Euler Stream API ключ (по избор, виж README):").pack(
-            side="left", padx=(0, 8)
-        )
+        self.direct_api_key_frame = self._row(tab, "Euler Stream ключ:")
         self.api_key_entry = ctk.CTkEntry(
-            key_frame, placeholder_text="оставяш празно за безплатен общ лимит"
+            self.direct_api_key_frame, placeholder_text="по избор — оставяш празно за общия лимит"
         )
         self.api_key_entry.pack(side="left", fill="x", expand=True)
 
-        tikfinity_frame = ctk.CTkFrame(tab_main)
-        self.tikfinity_frame = tikfinity_frame
-        ctk.CTkLabel(tikfinity_frame, text="TikFinity WebSocket адрес:").pack(side="left", padx=(0, 8))
-        self.tikfinity_url_entry = ctk.CTkEntry(tikfinity_frame)
+        self.tikfinity_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        ctk.CTkLabel(self.tikfinity_frame, text="TikFinity адрес:", width=200, anchor="w").pack(side="left")
+        self.tikfinity_url_entry = ctk.CTkEntry(self.tikfinity_frame)
         self.tikfinity_url_entry.insert(0, "ws://localhost:21213/")
         self.tikfinity_url_entry.pack(side="left", fill="x", expand=True)
         self.tikfinity_note = ctk.CTkLabel(
-            tab_main,
-            text="(Изисква пуснат и свързан TikFinity на компютъра ти)",
-            text_color="gray",
+            tab, text="Изисква пуснат и свързан TikFinity на компютъра ти.",
+            font=ctk.CTkFont(size=11), text_color="gray", anchor="w",
         )
 
-        btns = ctk.CTkFrame(tab_main)
-        btns.pack(fill="x", **pad)
-
-        self.start_btn = ctk.CTkButton(btns, text="Старт", command=self.start_listening)
-        self.start_btn.pack(side="left", padx=(0, 8))
-
-        self.stop_btn = ctk.CTkButton(btns, text="Стоп", command=self.stop_listening, state="disabled")
-        self.stop_btn.pack(side="left")
-
-        self.status_label = ctk.CTkLabel(
-            tab_main, text="Подготовка на българския глас...", text_color="orange"
-        )
-        self.status_label.pack(fill="x", padx=14)
-
-        ctk.CTkLabel(tab_main, text="Лог:").pack(anchor="w", padx=14)
-
-        self.log_box = ctk.CTkTextbox(tab_main, wrap="word")
-        self.log_box.pack(fill="both", expand=True, padx=14, pady=(0, 14))
+        self._section(tab, "Лог", "Тук виждаш всичко: коментари, филтри, AI отговори, грешки.")
+        self.log_box = ctk.CTkTextbox(tab, wrap="word", height=280)
+        self.log_box.pack(fill="both", expand=True, padx=4, pady=(0, 8))
         self.log_box.configure(state="disabled")
 
-        # ---------------- Таб "Филтри" ----------------
-        filt = ctk.CTkFrame(tab_filters)
-        filt.pack(fill="x", **pad)
+        btns = ctk.CTkFrame(tab, fg_color="transparent")
+        btns.pack(fill="x", padx=4, pady=(0, 10))
+        ctk.CTkButton(
+            btns, text="Изчисти лога", width=120, fg_color="gray30", hover_color="gray25",
+            command=self._clear_log,
+        ).pack(side="left")
 
+    # ------------------------------------------------------------------
+    def _build_filters_tab(self, tab):
+        self._section(tab, "Съдържание на коментарите")
+
+        row = self._row(tab)
         self.filter_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(filt, text="Филтър на думи:", variable=self.filter_var).pack(side="left", padx=(0, 8))
-        self.filter_entry = ctk.CTkEntry(
-            filt, placeholder_text="дума1, дума2, дума3 (разделени със запетая)"
-        )
+        ctk.CTkCheckBox(row, text="Забранени думи:", variable=self.filter_var, width=150).pack(side="left", padx=(0, 8))
+        self.filter_entry = ctk.CTkEntry(row, placeholder_text="дума1, дума2, дума3")
         self.filter_entry.pack(side="left", fill="x", expand=True)
-
-        extra = ctk.CTkFrame(tab_filters)
-        extra.pack(fill="x", **pad)
-
-        self.spam_filter_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(extra, text="Анти-спам защита", variable=self.spam_filter_var).pack(
-            side="left", padx=(0, 16)
-        )
-
-        self.heart_me_filter_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            extra,
-            text="Само от Heart Me донори + абонати на канала",
-            variable=self.heart_me_filter_var,
-        ).pack(side="left", padx=(0, 16))
-
-        extra2 = ctk.CTkFrame(tab_filters)
-        extra2.pack(fill="x", **pad)
 
         self.strip_mentions_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            extra2, text="Пропускай @споменавания (напр. @ivan123)", variable=self.strip_mentions_var
-        ).pack(side="left", padx=(0, 16))
+            tab, text="Пропускай @споменавания (напр. @ivan123)", variable=self.strip_mentions_var
+        ).pack(anchor="w", padx=8, pady=5)
 
         self.shlyokavitsa_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            extra2,
-            text="Конвертирай 'шльокавица' (Zdravei → Здравей) в кирилица",
-            variable=self.shlyokavitsa_var,
-        ).pack(side="left", padx=(0, 16))
+            tab, text="Конвертирай шльокавица (Zdravei → Здравей)", variable=self.shlyokavitsa_var
+        ).pack(anchor="w", padx=8, pady=5)
 
-        maxlen = ctk.CTkFrame(tab_filters)
-        maxlen.pack(fill="x", **pad)
-        ctk.CTkLabel(maxlen, text="Макс. брой символи за четене:").pack(side="left", padx=(0, 8))
-        self.max_chars_entry = ctk.CTkEntry(maxlen, width=80, placeholder_text="200")
+        self._section(tab, "Спам и злоупотреби")
+
+        self.spam_filter_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab, text="Анти-спам защита (реже flood и copy-paste)", variable=self.spam_filter_var
+        ).pack(anchor="w", padx=8, pady=5)
+
+        self.heart_me_filter_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab, text="Чети само от Heart Me донори + абонати", variable=self.heart_me_filter_var
+        ).pack(anchor="w", padx=8, pady=5)
+
+        self._section(tab, "Дължина")
+
+        row = self._row(tab, "Макс. символи в коментар:")
+        self.max_chars_entry = ctk.CTkEntry(row, width=80)
         self.max_chars_entry.insert(0, "200")
         self.max_chars_entry.pack(side="left", padx=(0, 16))
         self.skip_instead_of_truncate_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            maxlen,
-            text="Пропускай изцяло по-дългите (вместо да ги съкращава)",
-            variable=self.skip_instead_of_truncate_var,
+            row, text="Пропускай изцяло по-дългите", variable=self.skip_instead_of_truncate_var
         ).pack(side="left")
 
-        # ---------------- Таб "Събития" ----------------
-        ctk.CTkLabel(
-            tab_events,
-            text="Допълнителни гласови обявявания (извън коментарите):",
-            text_color="gray",
-        ).pack(anchor="w", padx=14, pady=(8, 0))
-
-        self.announce_follow_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            tab_events, text="Обявявай нови последователи", variable=self.announce_follow_var
-        ).pack(anchor="w", padx=14, pady=6)
-
-        self.announce_share_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            tab_events, text="Обявявай споделяния на стрийма", variable=self.announce_share_var
-        ).pack(anchor="w", padx=14, pady=6)
-
-        gift_frame = ctk.CTkFrame(tab_events)
-        gift_frame.pack(fill="x", padx=14, pady=6)
-        self.announce_gift_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            gift_frame,
-            text="Обявявай подаръци (различни от Heart Me)",
-            variable=self.announce_gift_var,
-        ).pack(side="left")
-
-        viewers_frame = ctk.CTkFrame(tab_events)
-        viewers_frame.pack(fill="x", padx=14, pady=6)
-        self.announce_viewers_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(
-            viewers_frame, text="Обявявай брой зрители на всеки", variable=self.announce_viewers_var
-        ).pack(side="left", padx=(0, 8))
-        self.viewer_interval_entry = ctk.CTkEntry(viewers_frame, width=70)
-        self.viewer_interval_entry.insert(0, "300")
-        self.viewer_interval_entry.pack(side="left")
-        ctk.CTkLabel(viewers_frame, text="секунди").pack(side="left", padx=(6, 0))
-
-        name_len_frame = ctk.CTkFrame(tab_events)
-        name_len_frame.pack(fill="x", padx=14, pady=(10, 6))
-        ctk.CTkLabel(
-            name_len_frame, text="Пропускай странни/твърде дълги имена в обявяванията по-горе:",
-            text_color="gray",
-        ).pack(anchor="w")
-        name_len_row = ctk.CTkFrame(name_len_frame)
-        name_len_row.pack(fill="x", pady=(4, 0))
-        ctk.CTkLabel(name_len_row, text="Макс. дължина на име:").pack(side="left", padx=(0, 8))
-        self.max_name_len_entry = ctk.CTkEntry(name_len_row, width=70)
+        row = self._row(tab, "Макс. дължина на име:")
+        self.max_name_len_entry = ctk.CTkEntry(row, width=80)
         self.max_name_len_entry.insert(0, "20")
         self.max_name_len_entry.pack(side="left")
+        self._hint(tab, "Имена по-дълги от това (или само от символи и цифри) не се обявяват на глас.")
 
-        # ---------------- Таб "Глас" ----------------
-        ctk.CTkLabel(
-            tab_voice,
-            text="Избери глас — Dimitar е офлайн (Piper), Borislav и Kalina са през "
-            "Microsoft Edge TTS (безплатно, изисква интернет).",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(8, 12))
+    # ------------------------------------------------------------------
+    def _build_voice_tab(self, tab):
+        self._section(
+            tab, "Избор на глас",
+            "Dimitar работи офлайн. Borislav и Kalina са през Microsoft Edge TTS (безплатно, но с интернет).",
+        )
 
-        voice_row = ctk.CTkFrame(tab_voice)
-        voice_row.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(voice_row, text="Глас:", width=200, anchor="w").pack(side="left")
+        row = self._row(tab, "Глас:")
         self.voice_engine_menu = ctk.CTkOptionMenu(
-            voice_row, values=[v["label"] for v in VOICE_REGISTRY.values()]
+            row, values=[v["label"] for v in VOICE_REGISTRY.values()]
         )
         self.voice_engine_menu.set(VOICE_REGISTRY["piper"]["label"])
         self.voice_engine_menu.pack(side="left", fill="x", expand=True)
 
         self.voice_shuffle_var = ctk.BooleanVar(value=False)
-        shuffle_row = ctk.CTkFrame(tab_voice)
-        shuffle_row.pack(fill="x", padx=14, pady=(0, 4))
         ctk.CTkCheckBox(
-            shuffle_row,
-            text="Разбъркай гласовете (произволен глас за всеки коментар)",
+            tab, text="Разбъркай гласовете (произволен глас за всеки коментар)",
             variable=self.voice_shuffle_var,
-        ).pack(side="left")
+        ).pack(anchor="w", padx=8, pady=(8, 4))
 
-        shuffle_pool_frame = ctk.CTkFrame(tab_voice)
-        shuffle_pool_frame.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(shuffle_pool_frame, text="Включени в разбъркването:", text_color="gray").pack(
-            anchor="w", padx=(20, 0), pady=(4, 2)
-        )
-        pool_row1 = ctk.CTkFrame(shuffle_pool_frame)
-        pool_row1.pack(fill="x", padx=(20, 0))
-
-        self.shuffle_vars: dict[str, ctk.BooleanVar] = {}
+        pool = self._row(tab, "В разбъркването:")
+        self.shuffle_vars = {}
         for key in VOICE_REGISTRY:
             var = ctk.BooleanVar(value=True)
             self.shuffle_vars[key] = var
-            ctk.CTkCheckBox(pool_row1, text=VOICE_REGISTRY[key]["short"], variable=var).pack(
-                side="left", padx=(0, 10)
+            ctk.CTkCheckBox(pool, text=VOICE_REGISTRY[key]["short"], variable=var, width=90).pack(
+                side="left", padx=(0, 12)
             )
 
-        def _make_slider(parent, label_text, frm, to, default, fmt="{:.2f}"):
-            row = ctk.CTkFrame(parent)
-            row.pack(fill="x", padx=14, pady=8)
-            ctk.CTkLabel(row, text=label_text, width=200, anchor="w").pack(side="left")
-            value_label = ctk.CTkLabel(row, text=fmt.format(default), width=50)
+        self._section(tab, "Как звучи", "По-ниска скорост = по-бърз и енергичен говор.")
+
+        def slider(label_text, frm, to, default, fmt="{:.2f}"):
+            row = self._row(tab, label_text, label_width=220)
+            value_label = ctk.CTkLabel(row, text=fmt.format(default), width=55)
             value_label.pack(side="right")
+            s = ctk.CTkSlider(
+                row, from_=frm, to=to,
+                command=lambda v: value_label.configure(text=fmt.format(float(v))),
+            )
+            s.set(default)
+            s.pack(side="left", fill="x", expand=True, padx=10)
+            return s
 
-            def _on_change(v):
-                value_label.configure(text=fmt.format(float(v)))
+        self.speed_slider = slider("Скорост на говор:", 0.6, 1.4, 0.85)
+        self.expressiveness_slider = slider("Изразителност:", 0.3, 1.3, 0.9)
+        self.volume_slider = slider("Сила на звука:", 0.05, 3.0, 1.3, fmt="{:.2f}x")
 
-            slider = ctk.CTkSlider(row, from_=frm, to=to, command=_on_change)
-            slider.set(default)
-            slider.pack(side="left", fill="x", expand=True, padx=10)
-            return slider
-
-        ctk.CTkLabel(
-            tab_voice,
-            text="Настройките отдолу важат и за трите гласа "
-            "(за Edge TTS 'изразителност' се пренася като скорост/сила):",
-            text_color="gray",
-        ).pack(anchor="w", padx=14)
-
-        ctk.CTkLabel(
-            tab_voice, text="По-агресивен / енергичен звук ⟵⟶ по-спокоен, провлачен звук",
-            text_color="gray",
-        ).pack(anchor="w", padx=14)
-        self.speed_slider = _make_slider(
-            tab_voice, "Скорост на говор (по-ниско = по-бързо):", 0.6, 1.4, 0.85
-        )
-        self.expressiveness_slider = _make_slider(
-            tab_voice, "Изразителност (повече = по-жив звук):", 0.3, 1.3, 0.9
-        )
-        self.volume_slider = _make_slider(
-            tab_voice, "Сила на звука (0.05 = почти тихо, 3.0 = силно усилване):",
-            0.05, 3.0, 1.3, fmt="{:.2f}x"
-        )
-
-        # ---------------- Гласови ефекти (само за Dimitar/Piper) ----------------
-        ctk.CTkLabel(
-            tab_voice,
-            text="Гласови ефекти — работят само за Dimitar (Piper), защото Borislav/Kalina "
-            "идват компресирани от облака и не могат да се обработват допълнително:",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(16, 4))
-
-        effect_row = ctk.CTkFrame(tab_voice)
-        effect_row.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(effect_row, text="Ефект:", width=200, anchor="w").pack(side="left")
+        row = self._row(tab, "Ефект:", label_width=220)
         self.voice_effect_menu = ctk.CTkOptionMenu(
-            effect_row,
-            values=["Няма", "Дълбок глас", "Чипмънк", "Ехо", "Робот", "Реверберация"],
+            row, values=["Няма", "Дълбок глас", "Чипмънк", "Ехо", "Робот", "Реверберация"]
         )
         self.voice_effect_menu.set("Няма")
         self.voice_effect_menu.pack(side="left", fill="x", expand=True)
+        self._hint(tab, "Ефектите работят само за Dimitar — другите два гласа идват готови от облака.")
 
         ctk.CTkButton(
-            tab_voice, text="Пробвай гласа с тези настройки", command=self._preview_voice
-        ).pack(anchor="w", padx=14, pady=(10, 8))
+            tab, text="🔊 Пробвай гласа", command=self._preview_voice, width=170
+        ).pack(anchor="w", padx=8, pady=(4, 10))
 
-        # ---------------- Таб "AI" ----------------
-        ctk.CTkLabel(
-            tab_ai,
-            text="AI коментатор (Gemini) — след като коментар се прочете, AI-то реагира "
-            "кратко на него, понякога с шега. Изисква безплатен/платен Gemini API ключ "
-            "от aistudio.google.com (НЕ е нужен login с Google в приложението — само "
-            "ключ, копи-пейст).",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(8, 12))
+        self._section(tab, "Гласови обявявания", "Освен коментарите, какво друго да казва на глас.")
 
-        self.ai_enabled_var = ctk.BooleanVar(value=False)
+        self.announce_follow_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(tab, text="Нови последователи", variable=self.announce_follow_var).pack(
+            anchor="w", padx=8, pady=5
+        )
+        self.announce_share_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(tab, text="Споделяния (веднъж на човек)", variable=self.announce_share_var).pack(
+            anchor="w", padx=8, pady=5
+        )
+        self.announce_gift_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(tab, text="Подаръци (без Heart Me)", variable=self.announce_gift_var).pack(
+            anchor="w", padx=8, pady=5
+        )
+
+        row = self._row(tab)
+        self.announce_viewers_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            tab_ai, text="Активирай AI коментатор", variable=self.ai_enabled_var
-        ).pack(anchor="w", padx=14, pady=(0, 4))
+            row, text="Брой зрители на всеки", variable=self.announce_viewers_var, width=190
+        ).pack(side="left", padx=(0, 8))
+        self.viewer_interval_entry = ctk.CTkEntry(row, width=70)
+        self.viewer_interval_entry.insert(0, "300")
+        self.viewer_interval_entry.pack(side="left")
+        ctk.CTkLabel(row, text="секунди").pack(side="left", padx=(6, 0))
 
-        self.ai_speak_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            tab_ai, text="Изговаряй AI отговорите на глас (иначе само в лога)",
-            variable=self.ai_speak_var
-        ).pack(anchor="w", padx=14, pady=(0, 10))
+    # ------------------------------------------------------------------
+    def _build_ai_tab(self, tab):
+        self._section(
+            tab, "Gemini ключ",
+            "Един ключ обслужва и текстовия AI коментатор, и Live AI. Взима се безплатно, без карта.",
+        )
 
-        key_frame_ai = ctk.CTkFrame(tab_ai)
-        key_frame_ai.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(key_frame_ai, text="Gemini API ключ:", width=200, anchor="w").pack(side="left")
-        self.gemini_api_key_entry = ctk.CTkEntry(key_frame_ai, show="*")
+        row = self._row(tab, "API ключ:")
+        self.gemini_api_key_entry = ctk.CTkEntry(row, show="*")
         self.gemini_api_key_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         ctk.CTkButton(
-            key_frame_ai, text="Постави", width=80,
+            row, text="Постави", width=80,
             command=lambda: self._paste_into(self.gemini_api_key_entry),
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
-            key_frame_ai, text="Вземи ключ ↗", width=110,
+            row, text="Вземи ключ ↗", width=120,
             command=lambda: webbrowser.open("https://aistudio.google.com/apikey"),
         ).pack(side="left")
 
-        model_frame_ai = ctk.CTkFrame(tab_ai)
-        model_frame_ai.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(model_frame_ai, text="Gemini модел:", width=200, anchor="w").pack(side="left")
-        self.gemini_model_entry = ctk.CTkEntry(model_frame_ai)
-        self.gemini_model_entry.insert(0, "gemini-2.5-flash-lite")
+        self._section(
+            tab, "AI коментатор (текст)",
+            "След прочитане на коментар, AI-то реагира кратко — понякога с шега.",
+        )
+
+        self.ai_enabled_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(tab, text="Активирай AI коментатор", variable=self.ai_enabled_var).pack(
+            anchor="w", padx=8, pady=5
+        )
+        self.ai_speak_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab, text="Изговаряй AI отговорите на глас (иначе само в лога)",
+            variable=self.ai_speak_var,
+        ).pack(anchor="w", padx=8, pady=5)
+
+        row = self._row(tab, "Модел:")
+        self.gemini_model_entry = ctk.CTkOptionMenu(row, values=TEXT_MODELS)
+        self.gemini_model_entry.set(TEXT_MODELS[0])
         self.gemini_model_entry.pack(side="left", fill="x", expand=True)
 
-        freq_frame = ctk.CTkFrame(tab_ai)
-        freq_frame.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(freq_frame, text="Реагирай на:", width=200, anchor="w").pack(side="left")
+        row = self._row(tab, "Реагирай на:")
         self.ai_frequency_menu = ctk.CTkSegmentedButton(
-            freq_frame, values=["Всеки коментар", "На всеки N-ти"]
+            row, values=["Всеки коментар", "На всеки N-ти"]
         )
         self.ai_frequency_menu.set("На всеки N-ти")
         self.ai_frequency_menu.pack(side="left", fill="x", expand=True)
 
-        n_frame = ctk.CTkFrame(tab_ai)
-        n_frame.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(n_frame, text="N (при 'На всеки N-ти'):", width=200, anchor="w").pack(side="left")
-        self.ai_every_n_entry = ctk.CTkEntry(n_frame, width=70)
+        row = self._row(tab, "N =")
+        self.ai_every_n_entry = ctk.CTkEntry(row, width=70)
         self.ai_every_n_entry.insert(0, "10")
         self.ai_every_n_entry.pack(side="left")
-
-        ctk.CTkLabel(
-            tab_ai,
-            text="Съвет: без платено разплащане в Google Cloud, безплатният лимит е "
-            "~10-15 заявки/минута — 'На всеки N-ти' пази в тези граници. Ако имаш "
-            "включено разплащане, може спокойно да пуснеш 'Всеки коментар'.",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(0, 8))
-
-        # ---------------- Таб "Live AI" ----------------
-        ctk.CTkLabel(
-            tab_live,
-            text="Live AI (Gemini Live API) — говор-към-говор в реално време. AI-то "
-            "говори със собствен глас, поздравява нови последователи и споделяния, "
-            "коментира чата, и може да слуша теб през микрофона и да ти отговаря. "
-            "Ползва същия Gemini ключ от таб 'AI'.",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(8, 12))
-
-        live_btns = ctk.CTkFrame(tab_live)
-        live_btns.pack(fill="x", padx=14, pady=(0, 8))
-        self.live_start_btn = ctk.CTkButton(
-            live_btns, text="Свържи Live AI", command=self.start_live_ai
+        self._hint(
+            tab,
+            "Безплатният лимит е ~10-15 заявки в минута. 'На всеки N-ти' те пази в тези граници.",
         )
+
+        self._section(
+            tab, "Live AI (говор в реално време)",
+            "AI-то говори със собствен глас, поздравява последователи и може да те слуша.",
+        )
+
+        row = self._row(tab)
+        self.live_start_btn = ctk.CTkButton(row, text="Свържи Live AI", command=self.start_live_ai, width=150)
         self.live_start_btn.pack(side="left", padx=(0, 8))
         self.live_stop_btn = ctk.CTkButton(
-            live_btns, text="Спри Live AI", command=self.stop_live_ai, state="disabled"
+            row, text="Спри", command=self.stop_live_ai, state="disabled", width=100,
+            fg_color="gray30", hover_color="gray25",
         )
         self.live_stop_btn.pack(side="left")
 
-        self.live_status_label = ctk.CTkLabel(tab_live, text="Не е свързан.", text_color="gray")
-        self.live_status_label.pack(fill="x", padx=14, pady=(0, 10))
-
-        live_model_frame = ctk.CTkFrame(tab_live)
-        live_model_frame.pack(fill="x", padx=14, pady=(0, 8))
-        ctk.CTkLabel(live_model_frame, text="Live модел:", width=190, anchor="w").pack(side="left")
-        self.live_model_entry = ctk.CTkOptionMenu(live_model_frame, values=LIVE_MODELS)
+        row = self._row(tab, "Live модел:")
+        self.live_model_entry = ctk.CTkOptionMenu(row, values=LIVE_MODELS)
         self.live_model_entry.set(LIVE_MODELS[0])
         self.live_model_entry.pack(side="left", fill="x", expand=True)
 
-        live_voice_frame = ctk.CTkFrame(tab_live)
-        live_voice_frame.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(live_voice_frame, text="Глас на AI-то:", width=190, anchor="w").pack(side="left")
-        self.live_voice_menu = ctk.CTkOptionMenu(
-            live_voice_frame, values=["Puck", "Charon", "Kore", "Fenrir", "Aoede"]
-        )
+        row = self._row(tab, "Глас на AI-то:")
+        self.live_voice_menu = ctk.CTkOptionMenu(row, values=["Puck", "Charon", "Kore", "Fenrir", "Aoede"])
         self.live_voice_menu.set("Puck")
         self.live_voice_menu.pack(side="left", fill="x", expand=True)
 
+        self.live_autoreconnect_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab, text="Свързвай се автоматично при прекъсване", variable=self.live_autoreconnect_var
+        ).pack(anchor="w", padx=8, pady=5)
+
         ctk.CTkLabel(
-            tab_live, text="Какво да подава на AI-то:", text_color="gray"
-        ).pack(anchor="w", padx=14, pady=(4, 2))
+            tab, text="Какво да подава на Live AI-то:", font=ctk.CTkFont(size=11),
+            text_color="gray", anchor="w",
+        ).pack(fill="x", padx=8, pady=(8, 2))
 
         self.live_feed_follow_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            tab_live, text="Нови последователи (с коментар за смешни имена)",
-            variable=self.live_feed_follow_var
-        ).pack(anchor="w", padx=14, pady=4)
-
+        ctk.CTkCheckBox(tab, text="Нови последователи", variable=self.live_feed_follow_var).pack(
+            anchor="w", padx=8, pady=4
+        )
         self.live_feed_share_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            tab_live, text="Споделяния на стрийма", variable=self.live_feed_share_var
-        ).pack(anchor="w", padx=14, pady=4)
+        ctk.CTkCheckBox(tab, text="Споделяния", variable=self.live_feed_share_var).pack(
+            anchor="w", padx=8, pady=4
+        )
 
-        live_comment_row = ctk.CTkFrame(tab_live)
-        live_comment_row.pack(fill="x", padx=14, pady=4)
+        row = self._row(tab)
         self.live_feed_comment_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
-            live_comment_row, text="Коментари от чата, на всеки", variable=self.live_feed_comment_var
+            row, text="Коментари, на всеки", variable=self.live_feed_comment_var, width=180
         ).pack(side="left", padx=(0, 8))
-        self.live_every_n_entry = ctk.CTkEntry(live_comment_row, width=60)
+        self.live_every_n_entry = ctk.CTkEntry(row, width=60)
         self.live_every_n_entry.insert(0, "5")
         self.live_every_n_entry.pack(side="left")
-        ctk.CTkLabel(live_comment_row, text="-ти коментар").pack(side="left", padx=(6, 0))
+        ctk.CTkLabel(row, text="-ти").pack(side="left", padx=(6, 0))
 
-        mic_frame = ctk.CTkFrame(tab_live)
-        mic_frame.pack(fill="x", padx=14, pady=(12, 6))
+        self._section(tab, "Микрофон", "За да те слуша Live AI-то и да ти отговаря.")
+
         self.live_mic_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            mic_frame, text="Пусни микрофона (AI-то те слуша и ти отговаря)",
-            variable=self.live_mic_var, command=self._on_mic_toggle
-        ).pack(side="left")
+            tab, text="Пусни микрофона", variable=self.live_mic_var, command=self._on_mic_toggle
+        ).pack(anchor="w", padx=8, pady=5)
 
-        mic_dev_frame = ctk.CTkFrame(tab_live)
-        mic_dev_frame.pack(fill="x", padx=14, pady=(0, 6))
-        ctk.CTkLabel(mic_dev_frame, text="Микрофон:", width=190, anchor="w").pack(side="left")
-        self.mic_device_menu = ctk.CTkOptionMenu(mic_dev_frame, values=["(по подразбиране)"])
+        row = self._row(tab, "Устройство:")
+        self.mic_device_menu = ctk.CTkOptionMenu(row, values=["(по подразбиране)"])
         self.mic_device_menu.set("(по подразбиране)")
         self.mic_device_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ctk.CTkButton(
-            mic_dev_frame, text="Опресни", width=90, command=self._refresh_mic_devices
-        ).pack(side="left")
+        ctk.CTkButton(row, text="Опресни", width=90, command=self._refresh_mic_devices).pack(side="left")
 
-        hotkey_frame = ctk.CTkFrame(tab_live)
-        hotkey_frame.pack(fill="x", padx=14, pady=(0, 6))
-        ctk.CTkLabel(hotkey_frame, text="Клавиш за микрофона:", width=190, anchor="w").pack(side="left")
-        self.hotkey_entry = ctk.CTkEntry(hotkey_frame, width=110)
+        row = self._row(tab, "Клавиш:")
+        self.hotkey_entry = ctk.CTkEntry(row, width=110)
         self.hotkey_entry.insert(0, "f8")
         self.hotkey_entry.pack(side="left", padx=(0, 8))
         self.hotkey_mode_menu = ctk.CTkOptionMenu(
-            hotkey_frame, values=["Задръж за говорене", "Вкл./изкл. с натискане"], width=190
+            row, values=["Задръж за говорене", "Вкл./изкл. с натискане"], width=190
         )
         self.hotkey_mode_menu.set("Задръж за говорене")
         self.hotkey_mode_menu.pack(side="left", padx=(0, 8))
-        self.hotkey_btn = ctk.CTkButton(
-            hotkey_frame, text="Активирай", width=100, command=self._toggle_hotkey
-        )
+        self.hotkey_btn = ctk.CTkButton(row, text="Активирай", width=100, command=self._toggle_hotkey)
         self.hotkey_btn.pack(side="left")
+        self._hint(
+            tab,
+            "Клавишът работи и когато прозорецът не е на фокус. Примери: f8, ctrl+shift+m, alt+v.",
+        )
 
-        ctk.CTkLabel(
-            tab_live,
-            text="Клавишът работи и когато прозорецът не е на фокус (напр. докато "
-            "играеш). Примери: f8, ctrl+shift+m, alt+v. Ако Windows или антивирусът "
-            "блокира глобалните клавиши, ползвай отметката горе ръчно.",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(0, 8))
+    # ------------------------------------------------------------------
+    def _build_test_tab(self, tab):
+        self._section(
+            tab, "Тествай без истински лайв",
+            "Всички бутони минават през същите филтри и гласове като реалните събития.",
+        )
 
-        ctk.CTkLabel(
-            tab_live,
-            text="Микрофонът се включва/изключва по всяко време, дори докато Live AI "
-            "е свързан. Ако го оставиш изключен, AI-то само коментира стрийма, без да "
-            "те слуша (така харчиш по-малко от лимита).",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(0, 8))
-
-        # ---------------- Таб "Тест" ----------------
-        ctk.CTkLabel(
-            tab_test,
-            text="Тествай всичко без истински лайв. Бутоните по-долу симулират реални "
-            "събития и минават през същите филтри, гласове и AI логика, все едно идват "
-            "от TikTok.",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(8, 12))
-
-        test_name_frame = ctk.CTkFrame(tab_test)
-        test_name_frame.pack(fill="x", padx=14, pady=(0, 6))
-        ctk.CTkLabel(test_name_frame, text="Име за тест:", width=140, anchor="w").pack(side="left")
-        self.test_name_entry = ctk.CTkEntry(test_name_frame)
+        row = self._row(tab, "Име за тест:", label_width=150)
+        self.test_name_entry = ctk.CTkEntry(row)
         self.test_name_entry.insert(0, "ТестовПотребител")
         self.test_name_entry.pack(side="left", fill="x", expand=True)
 
-        test_comment_frame = ctk.CTkFrame(tab_test)
-        test_comment_frame.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkLabel(test_comment_frame, text="Коментар за тест:", width=140, anchor="w").pack(side="left")
-        self.test_comment_entry = ctk.CTkEntry(test_comment_frame)
+        row = self._row(tab, "Коментар за тест:", label_width=150)
+        self.test_comment_entry = ctk.CTkEntry(row)
         self.test_comment_entry.insert(0, "Zdravei kak si")
         self.test_comment_entry.pack(side="left", fill="x", expand=True)
 
-        row1 = ctk.CTkFrame(tab_test)
-        row1.pack(fill="x", padx=14, pady=4)
-        ctk.CTkButton(row1, text="Тест: коментар", command=self._test_comment).pack(
-            side="left", padx=(0, 8)
-        )
-        ctk.CTkButton(row1, text="Тест: нов последовател", command=self._test_follow).pack(
-            side="left", padx=(0, 8)
-        )
-        ctk.CTkButton(row1, text="Тест: споделяне", command=self._test_share).pack(side="left")
+        self._section(tab, "Симулирай събитие")
 
-        row2 = ctk.CTkFrame(tab_test)
-        row2.pack(fill="x", padx=14, pady=4)
-        ctk.CTkButton(row2, text="Тест: подарък (Роза)", command=self._test_gift).pack(
-            side="left", padx=(0, 8)
-        )
-        ctk.CTkButton(row2, text="Тест: Heart Me подарък", command=self._test_heart_me).pack(
-            side="left", padx=(0, 8)
-        )
-        ctk.CTkButton(row2, text="Тест: брой зрители", command=self._test_viewers).pack(side="left")
+        grid = ctk.CTkFrame(tab, fg_color="transparent")
+        grid.pack(fill="x", padx=4, pady=4)
+        tests = [
+            ("💬 Коментар", self._test_comment),
+            ("➕ Нов последовател", self._test_follow),
+            ("🔁 Споделяне", self._test_share),
+            ("🎁 Подарък (Роза)", self._test_gift),
+            ("❤️ Heart Me", self._test_heart_me),
+            ("👁 Брой зрители", self._test_viewers),
+            ("⚠️ Спам (5 бързи)", self._test_spam),
+            ("🧹 Изчисти паметта", self._test_reset),
+        ]
+        for i, (text, cmd) in enumerate(tests):
+            ctk.CTkButton(grid, text=text, command=cmd, width=200).grid(
+                row=i // 2, column=i % 2, padx=6, pady=5, sticky="ew"
+            )
+        grid.grid_columnconfigure((0, 1), weight=1)
 
-        row3 = ctk.CTkFrame(tab_test)
-        row3.pack(fill="x", padx=14, pady=(4, 12))
-        ctk.CTkButton(row3, text="Тест: спам (5 бързи коментара)", command=self._test_spam).pack(
-            side="left", padx=(0, 8)
-        )
-        ctk.CTkButton(row3, text="Изчисти тест паметта", command=self._test_reset).pack(side="left")
+        self._section(tab, "AI тестове", "Изискват Gemini ключ в таб 'AI'. Започни с проверката на връзката.")
 
-        ctk.CTkLabel(
-            tab_test, text="AI тестове (изискват Gemini ключ в таб 'AI'):",
-            text_color="gray"
-        ).pack(anchor="w", padx=14, pady=(10, 2))
-
-        row4 = ctk.CTkFrame(tab_test)
-        row4.pack(fill="x", padx=14, pady=(0, 12))
-        ctk.CTkButton(
-            row4, text="Тест връзка с Gemini", command=self._test_gemini_connection
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            row4, text="Тест: AI коментатор", command=self._test_ai_commentator
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            row4, text="Тест: изпрати към Live AI", command=self._test_live_feed
-        ).pack(side="left")
-
-        ctk.CTkLabel(
-            tab_test,
-            text="Съвет: 'Изчисти тест паметта' нулира кой вече е споделял и кой е "
-            "пращал Heart Me, за да можеш да тестваш същите неща отново.",
-            text_color="gray",
-            wraplength=560,
-            justify="left",
-        ).pack(anchor="w", padx=14, pady=(0, 8))
+        ai_grid = ctk.CTkFrame(tab, fg_color="transparent")
+        ai_grid.pack(fill="x", padx=4, pady=(4, 12))
+        ai_tests = [
+            ("🔌 Тест връзка с Gemini", self._test_gemini_connection),
+            ("🤖 Тест AI коментатор", self._test_ai_commentator),
+            ("🎙 Изпрати към Live AI", self._test_live_feed),
+        ]
+        for i, (text, cmd) in enumerate(ai_tests):
+            ctk.CTkButton(ai_grid, text=text, command=cmd, width=200).grid(
+                row=i // 2, column=i % 2, padx=6, pady=5, sticky="ew"
+            )
+        ai_grid.grid_columnconfigure((0, 1), weight=1)
 
     # ------------------------------------------------------------------
     # Тестови симулации
@@ -1178,7 +1074,7 @@ class App(ctk.CTk):
 
         name = self._test_name()
         text = self.test_comment_entry.get().strip() or "тестов коментар"
-        model = self.gemini_model_entry.get().strip() or "gemini-2.5-flash-lite"
+        model = self.gemini_model_entry.get().strip() or TEXT_MODELS[0]
         self._log(f"--- ТЕСТ: AI коментатор (модел {model}) ---")
         self._log(f"[Тест] Пращам: \"{text}\" от {name}...")
 
@@ -1257,6 +1153,11 @@ class App(ctk.CTk):
         walk(self)
         return count
 
+    def _clear_log(self):
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
+
     def _log(self, msg: str):
         self.log_queue.put(msg)
 
@@ -1296,14 +1197,10 @@ class App(ctk.CTk):
                 self._log("[Система] Гласът е свален успешно.")
 
             self.voice = PiperVoice.load(str(MODEL_PATH), str(CONFIG_PATH))
-            self._set_status(self.status_label, "Готово. Въведи потребителско име и натисни Старт.", "lightgreen")
+            self._set_status(self.status_label, "● Готов", "lightgreen")
         except Exception as e:
             self._log(f"[Грешка при зареждане на гласа] {e}")
-            self._set_status(
-                self.status_label,
-                "Грешка при подготовка на гласа — виж лога. Провери интернет връзката.",
-                "red",
-            )
+            self._set_status(self.status_label, "● Грешка с гласа — виж лога", "red")
 
     # ------------------------------------------------------------------
     # Филтър
@@ -1497,7 +1394,7 @@ class App(ctk.CTk):
         self.live_running = True
         self.live_start_btn.configure(state="disabled")
         self.live_stop_btn.configure(state="normal")
-        self.live_status_label.configure(text="Свързване...", text_color="orange")
+        self.live_status_label.configure(text="◌ Live AI свързване...", text_color="orange")
 
         threading.Thread(target=self._run_live_client, args=(api_key,), daemon=True).start()
 
@@ -1513,7 +1410,7 @@ class App(ctk.CTk):
                 pass
         self.live_start_btn.configure(state="normal")
         self.live_stop_btn.configure(state="disabled")
-        self.live_status_label.configure(text="Спрян.", text_color="gray")
+        self.live_status_label.configure(text="○ Live AI изключен", text_color="gray")
 
     def _feed_live(self, text: str):
         """Подава текстово събитие на Live AI-то (ако е свързано)."""
@@ -1756,7 +1653,7 @@ class App(ctk.CTk):
                     self._log("[Live AI] Setup потвърден от сървъра.")
 
                 self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
-                self._set_status(self.live_status_label, "Свързан ✓", "lightgreen")
+                self._set_status(self.live_status_label, "● Live AI активен", "lightgreen")
 
                 await asyncio.gather(sender(ws), receiver(ws, out_stream))
 
@@ -1791,17 +1688,29 @@ class App(ctk.CTk):
             traceback.print_exc()
         finally:
             self.live_ws = None
-            self.live_running = False
             self._stop_mic()
+
+            # Автоматично пресвързване, ако връзката е паднала сама
+            if self.live_running and self.live_autoreconnect_var.get():
+                self._log("[Live AI] Връзката падна — пресвързвам се след 3 секунди...")
+                self._set_status(self.live_status_label, "◌ Live AI пресвързване...", "orange")
+                time.sleep(3)
+                if self.live_running:
+                    threading.Thread(
+                        target=self._run_live_client, args=(api_key,), daemon=True
+                    ).start()
+                    return
+
+            self.live_running = False
             self._set_btn(self.live_start_btn, "normal")
             self._set_btn(self.live_stop_btn, "disabled")
-            self._set_status(self.live_status_label, "Прекъснат.", "gray")
+            self._set_status(self.live_status_label, "○ Live AI прекъснат", "gray")
 
     def _ai_worker(self):
         while True:
             nickname, comment = self.ai_request_queue.get()
             api_key = self.gemini_api_key_entry.get().strip()
-            model = self.gemini_model_entry.get().strip() or "gemini-2.5-flash-lite"
+            model = self.gemini_model_entry.get().strip() or TEXT_MODELS[0]
             try:
                 reply = call_gemini(api_key, model, nickname, comment)
                 if reply:
@@ -1980,7 +1889,7 @@ class App(ctk.CTk):
         self.is_running = True
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
-        self.status_label.configure(text=f"Свързване към @{username} ...", text_color="orange")
+        self.status_label.configure(text=f"◌ Свързване към @{username}...", text_color="orange")
 
         api_key = self.api_key_entry.get().strip()
         WebDefaults.tiktok_sign_api_key = api_key if api_key else None
@@ -2010,7 +1919,7 @@ class App(ctk.CTk):
 
         self.start_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
-        self.status_label.configure(text="Спряно.", text_color="gray")
+        self.status_label.configure(text="○ Спряно", text_color="gray")
 
     # ------------------------------------------------------------------
     # TikFinity връзка (Advanced режим)
@@ -2024,7 +1933,7 @@ class App(ctk.CTk):
         self.is_running = True
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
-        self.status_label.configure(text=f"Свързване към TikFinity ({url}) ...", text_color="orange")
+        self.status_label.configure(text="◌ Свързване към TikFinity...", text_color="orange")
 
         self.tiktok_thread = threading.Thread(
             target=self._run_tikfinity_client, args=(url,), daemon=True
@@ -2041,7 +1950,7 @@ class App(ctk.CTk):
             async with websockets.connect(url) as ws:
                 self.tikfinity_ws = ws
                 self._log("[Система] Свързан към TikFinity. Изчакваме коментари...")
-                self._set_status(self.status_label, "На живо (през TikFinity)", "lightgreen")
+                self._set_status(self.status_label, "● На живо (TikFinity)", "lightgreen")
 
                 async for raw_message in ws:
                     try:
@@ -2113,7 +2022,7 @@ class App(ctk.CTk):
         @client.on(ConnectEvent)
         async def on_connect(_event: ConnectEvent):
             self._log(f"[Система] Свързан към @{username}. Изчакваме коментари...")
-            self._set_status(self.status_label, f"На живо: @{username}", "lightgreen")
+            self._set_status(self.status_label, f"● На живо: @{username}", "lightgreen")
 
         @client.on(CommentEvent)
         async def on_comment(event: CommentEvent):
