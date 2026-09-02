@@ -563,6 +563,7 @@ class App(ctk.CTk):
         self._enable_clipboard_everywhere()
         self._load_settings()
         self.cfg = {}
+        self._closing = False
         self._refresh_cfg()   # пълни кеша и се преизпълнява на всеки 300ms
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(60000, self._autosave_settings)
@@ -980,6 +981,21 @@ class App(ctk.CTk):
         self.live_voice_menu = ctk.CTkOptionMenu(row, values=["Puck", "Charon", "Kore", "Fenrir", "Aoede"])
         self.live_voice_menu.set("Puck")
         self.live_voice_menu.pack(side="left", fill="x", expand=True)
+
+        row = self._row(tab, "Сила на звука на AI-то:", label_width=200)
+        self.live_volume_label = ctk.CTkLabel(row, text="1.00x", width=55)
+        self.live_volume_label.pack(side="right")
+        self.live_volume_slider = ctk.CTkSlider(
+            row, from_=0.05, to=2.5,
+            command=lambda v: self.live_volume_label.configure(text=f"{float(v):.2f}x"),
+        )
+        self.live_volume_slider.set(1.0)
+        self.live_volume_slider.pack(side="left", fill="x", expand=True, padx=10)
+        self._hint(
+            tab,
+            "Регулира само гласа на Gemini. Плъзгачът в таб 'Глас' важи за "
+            "Dimitar/Borislav/Kalina и не влияе тук.",
+        )
 
         self.live_autoreconnect_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
@@ -1422,7 +1438,9 @@ class App(ctk.CTk):
         "gemini_model_entry", "ai_frequency_menu", "live_model_entry",
         "live_voice_menu", "mic_device_menu", "hotkey_mode_menu",
     ]
-    SETTINGS_SLIDERS = ["speed_slider", "expressiveness_slider", "volume_slider"]
+    SETTINGS_SLIDERS = [
+        "speed_slider", "expressiveness_slider", "volume_slider", "live_volume_slider",
+    ]
 
     def _settings_path(self) -> Path:
         return BASE_DIR / "settings.json"
@@ -1511,13 +1529,22 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+        # плъзгачите не викат командата си при .set(), затова обновяваме етикета ръчно
+        try:
+            self.live_volume_label.configure(text=f"{self.live_volume_slider.get():.2f}x")
+        except Exception:
+            pass
+
         self._log("[Настройки] Заредени от предишния път.")
 
     def _autosave_settings(self):
+        if getattr(self, "_closing", False):
+            return
         self._save_settings(silent=True)
         self.after(60000, self._autosave_settings)
 
     def _on_close(self):
+        self._closing = True     # спира периодичните задачи, преди да махнем прозореца
         self._save_settings(silent=True)
         try:
             self._unregister_hotkey()
@@ -1532,6 +1559,8 @@ class App(ctk.CTk):
     # "main thread is not in main loop". Затова главната нишка обновява този кеш,
     # а работните нишки четат само от него.
     def _refresh_cfg(self):
+        if getattr(self, "_closing", False):
+            return
         try:
             self.cfg = {
                 "gemini_key": self.gemini_api_key_entry.get().strip(),
@@ -1547,6 +1576,7 @@ class App(ctk.CTk):
                 "shuffle": self.voice_shuffle_var.get(),
                 "shuffle_pool": [k for k, v in self.shuffle_vars.items() if v.get()],
                 "output_mode": self.output_mode.get(),
+                "live_volume": float(self.live_volume_slider.get()),
             }
         except Exception:
             pass  # прозорецът се затваря — кешът остава последно известния
@@ -1577,6 +1607,8 @@ class App(ctk.CTk):
             self.direct_api_key_frame.pack(fill="x", padx=14, pady=8)
 
     def _poll_log_queue(self):
+        if getattr(self, "_closing", False):
+            return
         try:
             while True:
                 msg = self.log_queue.get_nowait()
@@ -2163,7 +2195,13 @@ class App(ctk.CTk):
                     data_b64 = inline.get("data")
                     if data_b64 and out_stream is not None:
                         try:
-                            out_stream.write(base64.b64decode(data_b64))
+                            pcm = base64.b64decode(data_b64)
+                            gain = float(self._cfg("live_volume", 1.0))
+                            if abs(gain - 1.0) > 0.01:
+                                samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+                                samples = np.clip(samples * gain, -32768, 32767)
+                                pcm = samples.astype(np.int16).tobytes()
+                            out_stream.write(pcm)
                         except Exception:
                             pass
                     text = part.get("text")
