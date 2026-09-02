@@ -605,6 +605,20 @@ class App(ctk.CTk):
         )
         self.stop_btn.pack(side="right", pady=8)
 
+        # ---------------- Режим на изхода ----------------
+        mode_bar = ctk.CTkFrame(self)
+        mode_bar.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(
+            mode_bar, text="Кой говори:", font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(side="left", padx=(14, 10), pady=8)
+        self.output_mode = ctk.CTkSegmentedButton(
+            mode_bar,
+            values=["Само TTS гласове", "Само AI", "И двете"],
+            command=self._on_output_mode_changed,
+        )
+        self.output_mode.set("Само TTS гласове")
+        self.output_mode.pack(side="left", fill="x", expand=True, padx=(0, 14), pady=8)
+
         # ---------------- Табове ----------------
         self.tabview = ctk.CTkTabview(self, anchor="w")
         self.tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -899,6 +913,10 @@ class App(ctk.CTk):
         ctk.CTkCheckBox(tab, text="Споделяния", variable=self.live_feed_share_var).pack(
             anchor="w", padx=8, pady=4
         )
+        self.live_feed_gift_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(tab, text="Подаръци (вкл. Heart Me)", variable=self.live_feed_gift_var).pack(
+            anchor="w", padx=8, pady=4
+        )
 
         row = self._row(tab)
         self.live_feed_comment_var = ctk.BooleanVar(value=True)
@@ -1009,6 +1027,8 @@ class App(ctk.CTk):
 
     def _test_share(self):
         self._log("--- ТЕСТ: споделяне ---")
+        # Чистим защитата от повторение, за да работи тестът всеки път
+        self.announced_sharers.discard("test_user")
         self._on_share_event(self._test_name(), "test_user")
 
     def _test_gift(self):
@@ -1017,6 +1037,8 @@ class App(ctk.CTk):
 
     def _test_heart_me(self):
         self._log("--- ТЕСТ: Heart Me подарък ---")
+        # Чистим, за да се задейства и при повторен тест
+        self.heart_me_senders.discard("test_user")
         self._register_heart_me_gift(self._test_name(), "test_user", "Heart Me")
 
     def _test_viewers(self):
@@ -1083,7 +1105,7 @@ class App(ctk.CTk):
                 reply = call_gemini(api_key, model, name, text)
                 self._log(f"[AI отговор] {reply}")
                 if self.ai_speak_var.get():
-                    self._enqueue_latest_only(reply)
+                    self._enqueue_latest_only(reply, source="ai")
                 else:
                     self._log("[Тест] (Изговарянето е изключено — виж отметката в таб 'AI'.)")
             except GeminiError as e:
@@ -1272,7 +1294,29 @@ class App(ctk.CTk):
             cut = cut[:last_space]
         return cut.strip()
 
-    def _enqueue_latest_only(self, text: str):
+    def _on_output_mode_changed(self, value: str):
+        if value == "Само AI":
+            self._log("[Режим] Само AI — обикновените TTS гласове са заглушени.")
+        elif value == "Само TTS гласове":
+            self._log("[Режим] Само TTS — AI отговорите няма да се четат на глас.")
+        else:
+            self._log("[Режим] И двете — TTS и AI говорят заедно.")
+
+    def _speech_allowed(self, source: str) -> bool:
+        """Решава дали даден източник има право да говори според режима.
+        source: 'tts' (коментари и обявявания) или 'ai' (Gemini отговори)."""
+        mode = self.output_mode.get()
+        if mode == "И двете":
+            return True
+        if mode == "Само AI":
+            return source == "ai"
+        return source == "tts"  # "Само TTS гласове"
+
+    def _enqueue_latest_only(self, text: str, source: str = "tts"):
+        # Режимът решава дали този източник изобщо има право да говори.
+        if source != "preview" and not self._speech_allowed(source):
+            return
+
         # Изхвърляме всичко чакащо в опашката (все още неизговорено) и слагаме
         # само най-новия коментар, за да не се трупа "изоставане" при много
         # коментари наведнъж. Коментарът, който в момента се изговаря, не се
@@ -1330,6 +1374,8 @@ class App(ctk.CTk):
             if user_key not in self.heart_me_senders:
                 self.heart_me_senders.add(user_key)
                 self._log(f"[Система] {nickname} прати Heart Me — вече е допустим.")
+                if self.live_running and self.live_feed_gift_var.get():
+                    self._feed_live(f"{nickname} прати Heart Me подарък! Благодари му топло.")
 
     def _announce(self, text: str):
         """Пуска системно съобщение за изговаряне (нов последовател, споделяне и т.н.)."""
@@ -1716,7 +1762,7 @@ class App(ctk.CTk):
                 if reply:
                     self._log(f"[AI] {reply}")
                     if self.ai_speak_var.get():
-                        self._enqueue_latest_only(reply)
+                        self._enqueue_latest_only(reply, source="ai")
             except GeminiError as e:
                 self._log(f"[AI грешка] {e}")
 
@@ -1746,6 +1792,10 @@ class App(ctk.CTk):
         gn = (gift_name or "").strip()
         if gn.lower() == HEART_ME_GIFT_NAME:
             return  # Heart Me си има собствена логика, не го обявяваме отделно
+
+        if self.live_running and self.live_feed_gift_var.get() and gn:
+            self._feed_live(f"{nickname} прати подарък {gn}. Благодари му кратко.")
+
         if (
             self.announce_gift_var.get()
             and gn
@@ -1806,6 +1856,7 @@ class App(ctk.CTk):
         return f"{rate_pct:+d}%", f"{vol_pct:+d}%"
 
     def _preview_voice(self):
+        # Ръчна проба — винаги се чува, независимо от режима
         self.speech_queue.put("Здравей, така ще звуча с тези настройки.")
 
     def _speaker_worker(self):
