@@ -315,6 +315,19 @@ GEMINI_SYSTEM_PROMPT = (
 )
 
 
+def streamer_line(streamer_name: str) -> str:
+    """Добавка към промпта, с която AI-то знае как се казва стриймърът."""
+    name = (streamer_name or "").strip()
+    if not name:
+        return ""
+    return (
+        f" Стриймърът, чийто лайв водиш, се казва {name}. "
+        f"От време на време се обръщай към него по име ({name}) — например когато "
+        "съобщаваш нови последователи или благодариш за подаръци. Не прекалявай: "
+        "използвай името му от време на време, не във всяко изречение."
+    )
+
+
 class GeminiError(Exception):
     pass
 
@@ -358,14 +371,18 @@ LIVE_SYSTEM_PROMPT = (
 )
 
 
-def call_gemini(api_key: str, model: str, nickname: str, comment: str, timeout: int = 15) -> str:
+def call_gemini(api_key: str, model: str, nickname: str, comment: str,
+                streamer_name: str = "", timeout: int = 15) -> str:
     """Праща коментар на Gemini и връща кратка AI реакция на български.
     Хвърля GeminiError с четимо съобщение при проблем."""
     if not api_key:
         raise GeminiError("Липсва Gemini API ключ.")
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    prompt = f"{GEMINI_SYSTEM_PROMPT}\n\nПотребител \"{nickname}\" написа: \"{comment}\""
+    prompt = (
+        GEMINI_SYSTEM_PROMPT + streamer_line(streamer_name)
+        + f'\n\nПотребител "{nickname}" написа: "{comment}"'
+    )
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
 
     req = urllib.request.Request(
@@ -543,6 +560,8 @@ class App(ctk.CTk):
         self._build_ui()
         self._enable_clipboard_everywhere()
         self._load_settings()
+        self.cfg = {}
+        self._refresh_cfg()   # пълни кеша и се преизпълнява на всеки 300ms
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(60000, self._autosave_settings)
 
@@ -885,6 +904,17 @@ class App(ctk.CTk):
             command=lambda: webbrowser.open("https://aistudio.google.com/apikey"),
         ).pack(side="left")
 
+        row = self._row(tab, "Твоето име:")
+        self.streamer_name_entry = ctk.CTkEntry(
+            row, placeholder_text="напр. Пешо — с това име ще се обръща AI-то към теб"
+        )
+        self.streamer_name_entry.pack(side="left", fill="x", expand=True)
+        self._hint(
+            tab,
+            "AI-то ще те заговаря по име от време на време — напр. 'Пешо, 10 нови "
+            "последователи!'. Остави празно, ако не искаш.",
+        )
+
         self._section(
             tab, "AI коментатор (текст)",
             "След прочитане на коментар, AI-то реагира кратко — понякога с шега.",
@@ -1214,7 +1244,10 @@ class App(ctk.CTk):
 
         def worker():
             try:
-                reply = call_gemini(api_key, model, name, text)
+                reply = call_gemini(
+                    api_key, model, name, text,
+                    streamer_name=self.streamer_name_entry.get().strip(),
+                )
                 self._log(f"[AI отговор] {reply}")
                 if self.ai_speak_var.get():
                     self._enqueue_latest_only(reply, source="ai")
@@ -1370,7 +1403,7 @@ class App(ctk.CTk):
     SETTINGS_ENTRIES = [
         "username_entry", "api_key_entry", "tikfinity_url_entry", "filter_entry",
         "max_chars_entry", "max_name_len_entry", "viewer_interval_entry",
-        "gemini_api_key_entry", "ai_every_n_entry", "live_every_n_entry",
+        "gemini_api_key_entry", "streamer_name_entry", "ai_every_n_entry", "live_every_n_entry",
         "live_batch_seconds_entry", "hotkey_entry", "test_name_entry",
         "test_comment_entry",
     ]
@@ -1489,6 +1522,36 @@ class App(ctk.CTk):
         except Exception:
             pass
         self.destroy()
+
+    # ==================================================================
+    # Кеш на настройките (за фоновите процеси)
+    # ==================================================================
+    # Tkinter не е thread-safe — четенето на поле от фонов процес може да хвърли
+    # "main thread is not in main loop". Затова главната нишка обновява този кеш,
+    # а работните нишки четат само от него.
+    def _refresh_cfg(self):
+        try:
+            self.cfg = {
+                "gemini_key": self.gemini_api_key_entry.get().strip(),
+                "gemini_model": self.gemini_model_entry.get().strip() or TEXT_MODELS[0],
+                "streamer_name": self.streamer_name_entry.get().strip(),
+                "ai_speak": self.ai_speak_var.get(),
+                "batch_seconds": self.live_batch_seconds_entry.get().strip(),
+                "speed": float(self.speed_slider.get()),
+                "expressiveness": float(self.expressiveness_slider.get()),
+                "volume": float(self.volume_slider.get()),
+                "effect": self.voice_effect_menu.get(),
+                "voice_label": self.voice_engine_menu.get(),
+                "shuffle": self.voice_shuffle_var.get(),
+                "shuffle_pool": [k for k, v in self.shuffle_vars.items() if v.get()],
+                "output_mode": self.output_mode.get(),
+            }
+        except Exception:
+            pass  # прозорецът се затваря — кешът остава последно известния
+        self.after(300, self._refresh_cfg)
+
+    def _cfg(self, key, default=None):
+        return getattr(self, "cfg", {}).get(key, default)
 
     def _clear_log(self):
         self.log_box.configure(state="normal")
@@ -1624,7 +1687,7 @@ class App(ctk.CTk):
         """Дали даден източник има право да ползва ЛОКАЛНИЯ глас (Piper/Edge).
         Live AI не минава оттук — то си пуска аудиото директно.
         source: 'tts' (коментари/обявявания) или 'ai' (текст от Gemini)."""
-        mode = self.output_mode.get()
+        mode = self._cfg("output_mode") or self.output_mode.get()
         if mode == "Само Live AI":
             return False  # нищо локално не говори — само гласът на Gemini
         if mode == "И двете":
@@ -1790,8 +1853,8 @@ class App(ctk.CTk):
         """Периодично събира натрупаните събития в едно съобщение и го праща."""
         while True:
             try:
-                interval = max(2, int(self.live_batch_seconds_entry.get().strip() or 8))
-            except (ValueError, AttributeError):
+                interval = max(2, int(self._cfg("batch_seconds") or 8))
+            except (ValueError, TypeError):
                 interval = 8
 
             time.sleep(interval)
@@ -2000,6 +2063,7 @@ class App(ctk.CTk):
 
         model = self.live_model_entry.get().strip() or LIVE_MODELS[0]
         voice = self.live_voice_menu.get()
+        streamer = self.streamer_name_entry.get().strip()
         url = LIVE_WS_URL.format(key=api_key)
 
         async def sender(ws):
@@ -2087,7 +2151,7 @@ class App(ctk.CTk):
                                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
                             },
                         },
-                        "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT}]},
+                        "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT + streamer_line(streamer)}]},
                     }
                 }))
 
@@ -2159,13 +2223,16 @@ class App(ctk.CTk):
     def _ai_worker(self):
         while True:
             nickname, comment = self.ai_request_queue.get()
-            api_key = self.gemini_api_key_entry.get().strip()
-            model = self.gemini_model_entry.get().strip() or TEXT_MODELS[0]
+            api_key = self._cfg("gemini_key", "")
+            model = self._cfg("gemini_model", TEXT_MODELS[0])
             try:
-                reply = call_gemini(api_key, model, nickname, comment)
+                reply = call_gemini(
+                    api_key, model, nickname, comment,
+                    streamer_name=self._cfg("streamer_name", ""),
+                )
                 if reply:
                     self._log(f"[AI] {reply}")
-                    if self.ai_speak_var.get():
+                    if self._cfg("ai_speak", True):
                         self._enqueue_latest_only(reply, source="ai")
             except GeminiError as e:
                 self._log(f"[AI грешка] {e}")
@@ -2237,22 +2304,22 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     def _get_synthesis_config(self) -> SynthesisConfig:
         return SynthesisConfig(
-            length_scale=float(self.speed_slider.get()),
-            noise_scale=float(self.expressiveness_slider.get()),
-            volume=float(self.volume_slider.get()),
+            length_scale=float(self._cfg("speed", 0.85)),
+            noise_scale=float(self._cfg("expressiveness", 0.9)),
+            volume=float(self._cfg("volume", 1.3)),
         )
 
     def _get_selected_voice(self) -> str:
         """Връща ключ от VOICE_REGISTRY.
         Ако разбъркването е включено, избира произволно измежду включените
         в пула гласове при всяко извикване (т.е. за всеки нов коментар)."""
-        if self.voice_shuffle_var.get():
-            pool = [key for key, var in self.shuffle_vars.items() if var.get()]
+        if self._cfg("shuffle", False):
+            pool = self._cfg("shuffle_pool") or []
             if pool:
                 return random.choice(pool)
             # ако нищо не е отметнато в пула, падаме обратно на падащото меню
 
-        label = self.voice_engine_menu.get()
+        label = self._cfg("voice_label") or self.voice_engine_menu.get()
         for key, info in VOICE_REGISTRY.items():
             if info["label"] == label:
                 return key
@@ -2260,8 +2327,8 @@ class App(ctk.CTk):
 
     def _edge_tts_params(self):
         """Превръща плъзгачите за скорост/сила в rate/volume параметри за Edge TTS."""
-        length_scale = float(self.speed_slider.get())
-        volume_mult = float(self.volume_slider.get())
+        length_scale = float(self._cfg("speed", 0.85))
+        volume_mult = float(self._cfg("volume", 1.3))
 
         rate_pct = round((1.0 / max(length_scale, 0.1) - 1.0) * 100)
         rate_pct = max(-80, min(rate_pct, 100))
@@ -2291,7 +2358,7 @@ class App(ctk.CTk):
                     with wave.open(tmp_path, "wb") as wav_file:
                         self.voice.synthesize_wav(text, wav_file, syn_config=syn_config)
 
-                    effect = self.voice_effect_menu.get()
+                    effect = self._cfg("effect", "Няма")
                     if effect != "Няма":
                         apply_voice_effect(tmp_path, effect)
 
