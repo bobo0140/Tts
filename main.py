@@ -552,6 +552,7 @@ class App(ctk.CTk):
         self.live_text_queue: "queue.Queue" = queue.Queue()   # събития -> AI
         self.live_mic_queue: "queue.Queue" = queue.Queue()    # микрофон -> AI
         self.live_mic_stream = None
+        self.muted = False               # заглушаване: спира звука, но НЕ къса връзките
         self.mic_active = False          # обикновен флаг — чете се от аудио нишката
         self.mic_chunks_sent = 0
         self.live_comment_counter = 0
@@ -653,6 +654,11 @@ class App(ctk.CTk):
         )
         self.live_status_label.pack(side="left")
 
+        self.mute_status_label = ctk.CTkLabel(
+            bar, text="", text_color=ERR_COLOR, font=ctk.CTkFont(size=13, weight="bold")
+        )
+        self.mute_status_label.pack(side="left", padx=(16, 0))
+
         self.start_btn = ctk.CTkButton(
             bar, text="▶  Старт", width=110, height=36, corner_radius=8,
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -664,7 +670,14 @@ class App(ctk.CTk):
             fg_color="transparent", border_width=1, border_color="gray40",
             hover_color="gray25", text_color=MUTED, command=self.stop_listening,
         )
-        self.stop_btn.pack(side="right")
+        self.stop_btn.pack(side="right", padx=(0, 8))
+
+        self.mute_btn = ctk.CTkButton(
+            bar, text="🔊  Заглуши", width=130, height=36, corner_radius=8,
+            fg_color="transparent", border_width=1, border_color="gray40",
+            hover_color="gray25", command=self.toggle_mute,
+        )
+        self.mute_btn.pack(side="right", padx=(0, 8))
 
         # ---------------- Режим на изхода ----------------
         mode_bar = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=10)
@@ -1073,6 +1086,17 @@ class App(ctk.CTk):
         self.hotkey_mode_menu.pack(side="left", padx=(0, 8))
         self.hotkey_btn = ctk.CTkButton(row, text="Активирай", width=100, command=self._toggle_hotkey)
         self.hotkey_btn.pack(side="left")
+
+        row = self._row(tab, "Клавиш за заглушаване:")
+        self.mute_hotkey_entry = ctk.CTkEntry(row, width=110)
+        self.mute_hotkey_entry.insert(0, "f9")
+        self.mute_hotkey_entry.pack(side="left")
+        self._hint(
+            tab,
+            "Заглушаването спира звука МОМЕНТАЛНО (и това, което се говори в момента), "
+            "но НЕ къса връзката с TikTok и Live AI — те продължават да работят и "
+            "коментарите се записват в лога. Активира се със същия бутон 'Активирай'.",
+        )
         self._hint(
             tab,
             "Клавишът работи и когато прозорецът не е на фокус. Примери: f8, ctrl+shift+m, alt+v.",
@@ -1422,7 +1446,8 @@ class App(ctk.CTk):
         "username_entry", "api_key_entry", "tikfinity_url_entry", "filter_entry",
         "max_chars_entry", "max_name_len_entry", "viewer_interval_entry",
         "gemini_api_key_entry", "streamer_name_entry", "ai_every_n_entry", "live_every_n_entry",
-        "live_batch_seconds_entry", "hotkey_entry", "test_name_entry",
+        "live_batch_seconds_entry", "hotkey_entry", "mute_hotkey_entry",
+        "test_name_entry",
         "test_comment_entry",
     ]
     SETTINGS_BOOLS = [
@@ -1584,6 +1609,50 @@ class App(ctk.CTk):
 
     def _cfg(self, key, default=None):
         return getattr(self, "cfg", {}).get(key, default)
+
+    # ------------------------------------------------------------------
+    # Заглушаване (спира звука, но НЕ къса нищо)
+    # ------------------------------------------------------------------
+    def toggle_mute(self):
+        self.set_muted(not self.muted)
+
+    def set_muted(self, value: bool):
+        self.muted = bool(value)
+
+        if self.muted:
+            # Спираме моментално това, което се говори В МОМЕНТА — това е
+            # смисълът на аварийния бутон.
+            try:
+                pygame.mixer.stop()
+                pygame.mixer.music.stop()
+            except Exception:
+                pass
+            # и изчистваме всичко чакащо
+            try:
+                while True:
+                    self.speech_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._log("[ЗАГЛУШЕНО] Звукът е спрян. Връзките с TikTok и Live AI остават активни.")
+        else:
+            self._log("[Звук] Пуснат отново.")
+
+        self._ui(self._refresh_mute_ui)
+
+    def _refresh_mute_ui(self):
+        try:
+            if self.muted:
+                self.mute_btn.configure(
+                    text="🔇  Заглушено", fg_color=ERR_COLOR, hover_color="#DC5555"
+                )
+                self.mute_status_label.configure(text="🔇 ЗАГЛУШЕНО", text_color=ERR_COLOR)
+            else:
+                self.mute_btn.configure(
+                    text="🔊  Заглуши", fg_color="transparent", hover_color="gray25"
+                )
+                self.mute_status_label.configure(text="")
+        except Exception:
+            pass
 
     def _clear_log(self):
         self.log_box.configure(state="normal")
@@ -2046,11 +2115,20 @@ class App(ctk.CTk):
             self._log(f"[Клавиш] Не мога да регистрирам '{combo}': {e}")
             return
 
+        # клавиш за заглушаване (по избор, отделен от този за микрофона)
+        mute_combo = self.mute_hotkey_entry.get().strip()
+        if mute_combo:
+            try:
+                keyboard.add_hotkey(mute_combo, self.toggle_mute)
+                self._log(f"[Клавиш] '{mute_combo}' заглушава/пуска звука.")
+            except Exception as e:
+                self._log(f"[Клавиш] Не мога да регистрирам '{mute_combo}': {e}")
+
         self.hotkey_active = True
         self.hotkey_combo = combo
         self.hotkey_btn.configure(text="Изключи")
         mode_text = "задържане" if hold_mode else "превключване"
-        self._log(f"[Клавиш] '{combo}' е активен ({mode_text}).")
+        self._log(f"[Клавиш] '{combo}' е активен за микрофона ({mode_text}).")
 
     def _unregister_hotkey(self):
         try:
@@ -2193,7 +2271,7 @@ class App(ctk.CTk):
                 for part in model_turn.get("parts", []):
                     inline = part.get("inlineData") or {}
                     data_b64 = inline.get("data")
-                    if data_b64 and out_stream is not None:
+                    if data_b64 and out_stream is not None and not self.muted:
                         try:
                             pcm = base64.b64decode(data_b64)
                             gain = float(self._cfg("live_volume", 1.0))
@@ -2429,6 +2507,8 @@ class App(ctk.CTk):
     def _speaker_worker(self):
         while True:
             text = self.speech_queue.get()
+            if self.muted:
+                continue      # заглушено — не синтезираме изобщо
             selected = self._get_selected_voice()
 
             try:
@@ -2449,6 +2529,9 @@ class App(ctk.CTk):
                     sound = pygame.mixer.Sound(tmp_path)
                     channel = sound.play()
                     while channel.get_busy():
+                        if self.muted:
+                            channel.stop()
+                            break
                         time.sleep(0.05)
                     os.remove(tmp_path)
 
@@ -2468,6 +2551,9 @@ class App(ctk.CTk):
                     pygame.mixer.music.load(tmp_path)
                     pygame.mixer.music.play()
                     while pygame.mixer.music.get_busy():
+                        if self.muted:
+                            pygame.mixer.music.stop()
+                            break
                         time.sleep(0.05)
                     pygame.mixer.music.unload()
                     os.remove(tmp_path)
