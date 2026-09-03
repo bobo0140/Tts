@@ -315,6 +315,39 @@ GEMINI_SYSTEM_PROMPT = (
 )
 
 
+PERSONALITIES = {
+    "Балансиран": "Дръж се приятелски и естествено.",
+    "Шегаджия": "Ти си голям шегаджия — почти всяка реплика има закачка или каламбур.",
+    "Спокоен": "Говориш спокойно и топло, без излишна екзалтация.",
+    "Енергичен": "Ти си много енергичен и възторжен, като спортен коментатор.",
+    "Саркастичен": "Имаш сух, саркастичен хумор — закачаш добронамерено, без да обиждаш.",
+    "Геймърски": "Говориш на геймърски жаргон и разбираш от игри.",
+}
+
+
+def mood_line(personality: str, humor: int, extra: str = "") -> str:
+    """Сглобява добавка към промпта според избраното настроение."""
+    parts = [PERSONALITIES.get(personality, PERSONALITIES["Балансиран"])]
+
+    if humor <= 20:
+        parts.append("Почти не се шегувай — бъди по-скоро информативен.")
+    elif humor <= 45:
+        parts.append("Шегувай се рядко, само когато е много подходящо.")
+    elif humor <= 70:
+        parts.append("Шегувай се умерено — в около половината от репликите.")
+    elif humor <= 90:
+        parts.append("Шегувай се често, почти във всяка реплика.")
+    else:
+        parts.append("Шегувай се максимално — всяка реплика да е закачка или майтап.")
+
+    parts.append("Никога не обиждай и не се подигравай на хора.")
+
+    if extra.strip():
+        parts.append(extra.strip())
+
+    return " " + " ".join(parts)
+
+
 def streamer_line(streamer_name: str) -> str:
     """Добавка към промпта, с която AI-то знае как се казва стриймърът."""
     name = (streamer_name or "").strip()
@@ -399,7 +432,7 @@ LIVE_SYSTEM_PROMPT = (
 
 
 def call_gemini(api_key: str, model: str, nickname: str, comment: str,
-                streamer_name: str = "", timeout: int = 15) -> str:
+                streamer_name: str = "", mood: str = "", timeout: int = 15) -> str:
     """Праща коментар на Gemini и връща кратка AI реакция на български.
     Хвърля GeminiError с четимо съобщение при проблем."""
     if not api_key:
@@ -412,7 +445,7 @@ def call_gemini(api_key: str, model: str, nickname: str, comment: str,
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     prompt = (
-        GEMINI_SYSTEM_PROMPT + streamer_line(streamer_name)
+        GEMINI_SYSTEM_PROMPT + mood + streamer_line(streamer_name)
         + f'\n\nПотребител "{nickname}" написа: "{comment}"'
     )
     payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
@@ -588,6 +621,13 @@ class App(ctk.CTk):
         self.live_send_stream_end = False
         self.live_setup_level = 0        # кое ниво на setup работи за този ключ/модел
         # Координация на ходовете — кой говори в момента
+        # Статистика за сесията
+        self.stat_follows = 0
+        self.stat_shares = 0
+        self.stat_gifts = 0
+        self.stat_comments = 0
+        self.stat_viewers = 0
+        self.known_moderators = set()
         self.half_duplex = True            # обикновен флаг за аудио нишката
         self.live_model_speaking = False   # AI-то говори
         self.live_last_voice_ts = 0.0      # кога за последно се чу глас в микрофона
@@ -698,6 +738,11 @@ class App(ctk.CTk):
             bar, text="", text_color=ERR_COLOR, font=ctk.CTkFont(size=13, weight="bold")
         )
         self.mute_status_label.pack(side="left", padx=(16, 0))
+
+        self.stats_label = ctk.CTkLabel(
+            bar, text="", text_color=MUTED, font=ctk.CTkFont(size=12)
+        )
+        self.stats_label.pack(side="left", padx=(20, 0))
 
         self.start_btn = ctk.CTkButton(
             bar, text="▶  Старт", width=110, height=36, corner_radius=8,
@@ -812,6 +857,10 @@ class App(ctk.CTk):
         ctk.CTkButton(
             btns, text="💾 Запази лога", width=140, fg_color="gray30", hover_color="gray25",
             command=self._save_log,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btns, text="🔄 Нулирай статистиката", width=190, fg_color="gray30",
+            hover_color="gray25", command=self._reset_stats,
         ).pack(side="left")
 
     # ------------------------------------------------------------------
@@ -978,6 +1027,32 @@ class App(ctk.CTk):
             "AI-то ще те заговаря по име от време на време — напр. 'Пешо, 10 нови "
             "последователи!'. Остави празно, ако не искаш.",
         )
+
+        self._section(
+            tab, "Характер на AI-то",
+            "Важи и за текстовия коментатор, и за Live AI.",
+        )
+
+        row = self._row(tab, "Характер:")
+        self.personality_menu = ctk.CTkOptionMenu(row, values=list(PERSONALITIES.keys()))
+        self.personality_menu.set("Балансиран")
+        self.personality_menu.pack(side="left", fill="x", expand=True)
+
+        row = self._row(tab, "Колко да се шегува:")
+        self.humor_label = ctk.CTkLabel(row, text="50%", width=55)
+        self.humor_label.pack(side="right")
+        self.humor_slider = ctk.CTkSlider(
+            row, from_=0, to=100,
+            command=lambda v: self.humor_label.configure(text=f"{int(float(v))}%"),
+        )
+        self.humor_slider.set(50)
+        self.humor_slider.pack(side="left", fill="x", expand=True, padx=10)
+
+        row = self._row(tab, "Свои инструкции:")
+        self.custom_prompt_entry = ctk.CTkEntry(
+            row, placeholder_text="напр. Играя Fortnite, споменавай това от време на време"
+        )
+        self.custom_prompt_entry.pack(side="left", fill="x", expand=True)
 
         self._section(
             tab, "AI коментатор (текст)",
@@ -1797,7 +1872,8 @@ class App(ctk.CTk):
     SETTINGS_ENTRIES = [
         "username_entry", "api_key_entry", "tikfinity_url_entry", "filter_entry",
         "max_chars_entry", "max_name_len_entry", "viewer_interval_entry",
-        "gemini_api_key_entry", "streamer_name_entry", "ai_every_n_entry", "live_every_n_entry",
+        "gemini_api_key_entry", "streamer_name_entry", "custom_prompt_entry",
+        "ai_every_n_entry", "live_every_n_entry",
         "live_batch_seconds_entry", "hotkey_entry", "mute_hotkey_entry",
         "test_name_entry",
         "test_comment_entry",
@@ -1819,6 +1895,7 @@ class App(ctk.CTk):
     ]
     SETTINGS_SLIDERS = [
         "speed_slider", "expressiveness_slider", "volume_slider", "live_volume_slider",
+        "humor_slider",
     ]
 
     def _settings_path(self) -> Path:
@@ -1941,6 +2018,9 @@ class App(ctk.CTk):
         self.live_comment_counter = 0
         self.live_resume_handle = None
         self.last_viewer_announcement_time = 0.0
+        self.stat_follows = self.stat_shares = self.stat_gifts = 0
+        self.stat_comments = self.stat_viewers = 0
+        self.known_moderators.clear()
 
         try:
             path = self._settings_path()
@@ -2031,8 +2111,17 @@ class App(ctk.CTk):
                 "live_volume": float(self.live_volume_slider.get()),
                 "debug": bool(self.debug_var.get()),
                 "half_duplex": bool(self.half_duplex_var.get()),
+                "personality": self.personality_menu.get(),
+                "humor": int(self.humor_slider.get()),
+                "custom_prompt": self.custom_prompt_entry.get().strip(),
             }
             self.half_duplex = self.cfg["half_duplex"]
+            self.stats_label.configure(
+                text=(
+                    f"👥 {self.stat_viewers}   ➕ {self.stat_follows}   "
+                    f"🔁 {self.stat_shares}   🎁 {self.stat_gifts}   💬 {self.stat_comments}"
+                )
+            )
         except Exception:
             pass  # прозорецът се затваря — кешът остава последно известния
         self.after(300, self._refresh_cfg)
@@ -2122,6 +2211,11 @@ class App(ctk.CTk):
         if len(text) > limit:
             text = text[:limit] + f"… (+{len(text) - limit} знака)"
         self._log(f"  [DEBUG {direction}] {text}")
+
+    def _reset_stats(self):
+        self.stat_follows = self.stat_shares = self.stat_gifts = 0
+        self.stat_comments = self.stat_viewers = 0
+        self._log("[Статистика] Нулирана.")
 
     def _clear_log(self):
         self.log_box.configure(state="normal")
@@ -2298,12 +2392,18 @@ class App(ctk.CTk):
             pass
         self.speech_queue.put(text)
 
-    def _process_incoming_comment(self, nickname: str, user_key: str, comment: str, is_subscriber: bool):
+    def _process_incoming_comment(self, nickname: str, user_key: str, comment: str,
+                                  is_subscriber: bool, is_moderator: bool = False):
         """Обща логика за входящ коментар — ползва се и от директната връзка,
         и от TikFinity връзката."""
         comment = clean_text_for_speech(comment or "")
         if not comment:
             return
+
+        self.stat_comments += 1
+        if is_moderator and user_key not in self.known_moderators:
+            self.known_moderators.add(user_key)
+            self._log(f"[Модератор] {nickname} е модератор в стрийма.")
 
         if self.strip_mentions_var.get():
             comment = strip_mentions(comment)
@@ -2313,12 +2413,12 @@ class App(ctk.CTk):
         if self.shlyokavitsa_var.get():
             converted = transliterate_shlyokavitsa(comment)
             if converted != comment:
-                self._log(f"{nickname}: {comment}  ->  {converted}")
+                self._log(f"{self._role_mark(user_key, is_moderator, is_subscriber)}{nickname}: {comment}  ->  {converted}")
             else:
-                self._log(f"{nickname}: {comment}")
+                self._log(f"{self._role_mark(user_key, is_moderator, is_subscriber)}{nickname}: {comment}")
             comment = converted
         else:
-            self._log(f"{nickname}: {comment}")
+            self._log(f"{self._role_mark(user_key, is_moderator, is_subscriber)}{nickname}: {comment}")
 
         if self._is_filtered(comment):
             self._log("   -> [филтрирано по забранена дума]")
@@ -2337,7 +2437,14 @@ class App(ctk.CTk):
             return
         self._enqueue_latest_only(speech_text)
         self._maybe_trigger_ai_commentary(nickname, comment)
-        self._maybe_feed_live_comment(nickname, comment)
+        self._maybe_feed_live_comment(nickname, comment, is_moderator, is_subscriber)
+
+    def _role_mark(self, user_key: str, is_moderator: bool, is_subscriber: bool) -> str:
+        if is_moderator or user_key in self.known_moderators:
+            return "🛡 "
+        if is_subscriber or user_key in self.confirmed_subscribers:
+            return "⭐ "
+        return ""
 
     def _register_heart_me_gift(self, nickname: str, user_key: str, gift_name: str):
         if (gift_name or "").strip().lower() == HEART_ME_GIFT_NAME and user_key:
@@ -2379,7 +2486,8 @@ class App(ctk.CTk):
 
         self.ai_request_queue.put((nickname, comment))
 
-    def _maybe_feed_live_comment(self, nickname: str, comment: str):
+    def _maybe_feed_live_comment(self, nickname: str, comment: str,
+                                 is_moderator: bool = False, is_subscriber: bool = False):
         """Подава коментар на Live AI-то на всеки N-ти (собствен брояч,
         независим от текстовия AI коментатор в таб 'AI')."""
         if not self.live_running or not self.live_feed_comment_var.get():
@@ -2394,7 +2502,12 @@ class App(ctk.CTk):
         if self.live_comment_counter % n != 0:
             return
 
-        self._feed_live("comment", f'{nickname}: "{comment}"')
+        role = ""
+        if is_moderator or nickname in self.known_moderators:
+            role = " (МОДЕРАТОР)"
+        elif is_subscriber:
+            role = " (абонат)"
+        self._feed_live("comment", f'{nickname}{role}: "{comment}"')
 
     # ------------------------------------------------------------------
     # Live AI (Gemini Live API) — говор-към-говор
@@ -2514,6 +2627,11 @@ class App(ctk.CTk):
 
         if not parts:
             return ""
+
+        parts.append(
+            f"(Общо тази сесия: {self.stat_follows} нови последователи, "
+            f"{self.stat_shares} споделяния, {self.stat_gifts} подаръка.)"
+        )
 
         return (
             " ".join(parts)
@@ -2800,7 +2918,15 @@ class App(ctk.CTk):
                 "speechConfig": speech_config,
             },
             "systemInstruction": {
-                "parts": [{"text": LIVE_SYSTEM_PROMPT + streamer_line(streamer)}]
+                "parts": [{"text": (
+                    LIVE_SYSTEM_PROMPT
+                    + mood_line(
+                        self.personality_menu.get(),
+                        int(self.humor_slider.get()),
+                        self.custom_prompt_entry.get().strip(),
+                    )
+                    + streamer_line(streamer)
+                )}]
             },
         }
 
@@ -3107,6 +3233,11 @@ class App(ctk.CTk):
                 reply = call_gemini(
                     api_key, model, nickname, comment,
                     streamer_name=self._cfg("streamer_name", ""),
+                    mood=mood_line(
+                        self._cfg("personality", "Балансиран"),
+                        self._cfg("humor", 50),
+                        self._cfg("custom_prompt", ""),
+                    ),
                 )
                 self._dbg("←", reply)
                 if reply:
@@ -3117,6 +3248,7 @@ class App(ctk.CTk):
                 self._log(f"[AI грешка] {e}")
 
     def _on_follow_event(self, nickname: str):
+        self.stat_follows += 1
         if self.live_running and self.live_feed_follow_var.get():
             self._feed_live("follow", nickname)
         if self.announce_follow_var.get() and is_reasonable_name(nickname, self._get_max_name_len()):
@@ -3128,6 +3260,7 @@ class App(ctk.CTk):
             return
         if user_key:
             self.announced_sharers.add(user_key)
+        self.stat_shares += 1
 
         if self.live_running and self.live_feed_share_var.get():
             self._feed_live("share", nickname)
@@ -3144,6 +3277,7 @@ class App(ctk.CTk):
             return  # Heart Me си има собствена логика, не го обявяваме отделно
 
         count = max(1, int(count or 1))
+        self.stat_gifts += count
         label = f"{gn} x{count}" if count > 1 else gn
 
         if self.live_running and self.live_feed_gift_var.get() and gn:
@@ -3179,6 +3313,7 @@ class App(ctk.CTk):
             return
         self.last_viewer_announcement_time = now
 
+        self.stat_viewers = int(viewer_count)
         if want_tts:
             self._announce(f"В момента гледат {viewer_count} души.")
         if want_live:
@@ -3410,7 +3545,10 @@ class App(ctk.CTk):
             user_key = data.get("uniqueId") or str(data.get("userId") or "unknown")
             comment = data.get("comment") or ""
             is_subscriber = bool(data.get("isSubscriber", False))
-            self._process_incoming_comment(nickname, user_key, comment, is_subscriber)
+            is_moderator = bool(data.get("isModerator", False))
+            self._process_incoming_comment(
+                nickname, user_key, comment, is_subscriber, is_moderator
+            )
 
         elif event_name == "gift":
             # Същата логика за серии, но с имената на полетата от TikFinity
@@ -3464,13 +3602,21 @@ class App(ctk.CTk):
                 if event.user else "unknown"
             )
             is_subscriber = False
+            is_moderator = False
             if event.user:
                 try:
                     is_subscriber = event.user.has_badge("SUBSCRIBER")
                 except Exception:
                     pass
+                try:
+                    is_moderator = bool(getattr(event.user, "is_moderator", False)) or \
+                        event.user.has_badge("MODERATOR")
+                except Exception:
+                    pass
 
-            self._process_incoming_comment(nickname, user_key, event.comment or "", is_subscriber)
+            self._process_incoming_comment(
+                nickname, user_key, event.comment or "", is_subscriber, is_moderator
+            )
 
         @client.on(GiftEvent)
         async def on_gift(event: GiftEvent):
