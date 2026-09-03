@@ -553,6 +553,7 @@ class App(ctk.CTk):
         self.live_mic_queue: "queue.Queue" = queue.Queue()    # микрофон -> AI
         self.live_mic_stream = None
         self.live_resume_handle = None   # талон за продължаване на същата Live сесия
+        self.live_send_stream_end = False
         self.muted = False               # заглушаване: спира звука, но НЕ къса връзките
         self.mic_active = False          # обикновен флаг — чете се от аудио нишката
         self.mic_chunks_sent = 0
@@ -765,6 +766,14 @@ class App(ctk.CTk):
         ctk.CTkButton(
             btns, text="Изчисти лога", width=120, fg_color="gray30", hover_color="gray25",
             command=self._clear_log,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btns, text="📋 Копирай лога", width=150, fg_color="gray30", hover_color="gray25",
+            command=self._copy_log,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            btns, text="💾 Запази лога", width=140, fg_color="gray30", hover_color="gray25",
+            command=self._save_log,
         ).pack(side="left")
 
     # ------------------------------------------------------------------
@@ -995,6 +1004,22 @@ class App(ctk.CTk):
         self.live_voice_menu = ctk.CTkOptionMenu(row, values=["Puck", "Charon", "Kore", "Fenrir", "Aoede"])
         self.live_voice_menu.set("Puck")
         self.live_voice_menu.pack(side="left", fill="x", expand=True)
+
+        row = self._row(tab, "Изход за звука на AI-то:", label_width=200)
+        self.live_output_menu = ctk.CTkOptionMenu(row, values=["(по подразбиране)"])
+        self.live_output_menu.set("(по подразбиране)")
+        self.live_output_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(row, text="Опресни", width=90, command=self._refresh_output_devices).pack(
+            side="left", padx=(0, 8)
+        )
+        ctk.CTkButton(
+            row, text="🔔 Тест", width=80, command=self._test_output_device
+        ).pack(side="left")
+        self._hint(
+            tab,
+            "Ако AI-то пише в лога, но не го чуваш, натисни '🔔 Тест' — пуска тон през "
+            "избрания изход. Ако не чуеш тона, проблемът е в изхода, не в AI-то.",
+        )
 
         row = self._row(tab, "Сила на звука на AI-то:", label_width=200)
         self.live_volume_label = ctk.CTkLabel(row, text="1.00x", width=55)
@@ -1480,7 +1505,8 @@ class App(ctk.CTk):
     SETTINGS_MENUS = [
         "connection_mode", "output_mode", "voice_engine_menu", "voice_effect_menu",
         "gemini_model_entry", "ai_frequency_menu", "live_model_entry",
-        "live_voice_menu", "mic_device_menu", "hotkey_mode_menu",
+        "live_voice_menu", "mic_device_menu", "live_output_menu",
+        "hotkey_mode_menu",
     ]
     SETTINGS_SLIDERS = [
         "speed_slider", "expressiveness_slider", "volume_slider", "live_volume_slider",
@@ -1672,6 +1698,30 @@ class App(ctk.CTk):
                 self.mute_status_label.configure(text="")
         except Exception:
             pass
+
+    def _copy_log(self):
+        try:
+            text = self.log_box.get("1.0", "end").strip()
+            if not text:
+                self._log("[Лог] Няма нищо за копиране.")
+                return
+            self.clipboard_clear()
+            self.clipboard_append(text)
+            self._log(f"[Лог] Копиран в клипборда ({len(text)} знака) — може да го поставиш.")
+        except Exception as e:
+            self._log(f"[Лог] Грешка при копиране: {e}")
+
+    def _save_log(self):
+        try:
+            text = self.log_box.get("1.0", "end").strip()
+            if not text:
+                self._log("[Лог] Няма нищо за запазване.")
+                return
+            path = BASE_DIR / f"log-{time.strftime('%Y%m%d-%H%M%S')}.txt"
+            path.write_text(text, encoding="utf-8")
+            self._log(f"[Лог] Запазен във {path.name} (до приложението).")
+        except Exception as e:
+            self._log(f"[Лог] Грешка при запазване: {e}")
 
     def _clear_log(self):
         self.log_box.configure(state="normal")
@@ -2059,6 +2109,83 @@ class App(ctk.CTk):
         else:
             self._stop_mic()
 
+    def _refresh_output_devices(self):
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            hostapis = sd.query_hostapis()
+        except Exception as e:
+            self._log(f"[Изход] Не мога да прочета устройствата: {e}")
+            return
+
+        priority = {"Windows WASAPI": 0, "Windows DirectSound": 1, "MME": 2}
+        best = {}
+        for idx, dev in enumerate(devices):
+            if dev.get("max_output_channels", 0) <= 0:
+                continue
+            name = dev["name"].strip()
+            try:
+                api_name = hostapis[dev["hostapi"]]["name"]
+            except Exception:
+                api_name = ""
+            rank = priority.get(api_name, 3)
+            if name not in best or rank < best[name][0]:
+                best[name] = (rank, idx)
+
+        names = ["(по подразбиране)"]
+        self.output_device_map = {}
+        for name, (_r, idx) in sorted(best.items(), key=lambda x: x[1][1]):
+            label = name if len(name) <= 45 else name[:45] + "…"
+            names.append(label)
+            self.output_device_map[label] = idx
+
+        current = self.live_output_menu.get()
+        self.live_output_menu.configure(values=names)
+        if current not in names:
+            self.live_output_menu.set("(по подразбиране)")
+        self._log(f"[Изход] {len(names) - 1} изходни устройства.")
+
+    def _get_selected_output_device(self):
+        label = self.live_output_menu.get()
+        if label == "(по подразбиране)":
+            return None
+        return getattr(self, "output_device_map", {}).get(label)
+
+    def _test_output_device(self):
+        """Пуска кратък тон през избрания изход — за да разберем дали
+        проблемът е в звуковия път или в AI-то."""
+        self._log("--- ТЕСТ: изход за звука на AI-то ---")
+
+        def worker():
+            try:
+                import sounddevice as sd
+            except Exception as e:
+                self._log(f"[Изход] sounddevice не е достъпен: {e}")
+                return
+            try:
+                dur, rate = 1.0, LIVE_OUTPUT_RATE
+                t = np.arange(int(dur * rate), dtype=np.float32) / rate
+                gain = float(self._cfg("live_volume", 1.0))
+                tone = (np.sin(2 * np.pi * 440 * t) * 8000 * gain)
+                tone = np.clip(tone, -32768, 32767).astype(np.int16)
+
+                device = self._get_selected_output_device()
+                stream = sd.RawOutputStream(
+                    samplerate=rate, dtype="int16", channels=1, device=device
+                )
+                stream.start()
+                stream.write(tone.tobytes())
+                stream.stop()
+                stream.close()
+                self._log(
+                    f"[Изход] Тонът е изпратен (сила {gain:.2f}x). Ако НЕ го чу — "
+                    "избери друго устройство от списъка и пробвай пак."
+                )
+            except Exception as e:
+                self._log(f"[Изход] ГРЕШКА при пускане на звук: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _refresh_mic_devices(self):
         try:
             import sounddevice as sd
@@ -2201,7 +2328,10 @@ class App(ctk.CTk):
             self.live_mic_var.set(False)
 
     def _stop_mic(self):
+        was_active = self.mic_active
         self.mic_active = False
+        if was_active and self.live_running:
+            self.live_send_stream_end = True
         if self.live_mic_stream is not None:
             try:
                 self.live_mic_stream.stop()
@@ -2251,6 +2381,14 @@ class App(ctk.CTk):
                 except queue.Empty:
                     pass
 
+                # Сигнал "потокът свърши" — иначе сървърът чака още звук
+                # вечно и не отговаря, когато спреш микрофона.
+                if self.live_send_stream_end:
+                    self.live_send_stream_end = False
+                    await ws.send(json.dumps({"realtimeInput": {"audioStreamEnd": True}}))
+                    self._log("[Live AI] Край на говора — чакам отговор.")
+                    sent_something = True
+
                 # текстови събития от стрийма
                 try:
                     while True:
@@ -2296,6 +2434,11 @@ class App(ctk.CTk):
 
                 server_content = msg.get("serverContent") or {}
 
+                if server_content.get("interrupted"):
+                    self._log("[Live AI] Прекъснат (заговорил си докато AI-то говори).")
+                if server_content.get("turnComplete"):
+                    self._log("[Live AI] Ходът е завършен.")
+
                 in_tr = (server_content.get("inputTranscription") or {}).get("text")
                 if in_tr:
                     self._log(f"[Чух те] {in_tr}")
@@ -2327,14 +2470,20 @@ class App(ctk.CTk):
             try:
                 import sounddevice as sd
                 out_stream = sd.RawOutputStream(
-                    samplerate=LIVE_OUTPUT_RATE, dtype="int16", channels=1
+                    samplerate=LIVE_OUTPUT_RATE, dtype="int16", channels=1,
+                    device=self._get_selected_output_device(),
                 )
                 out_stream.start()
+                self._log("[Live AI] Аудио изходът е отворен.")
             except Exception as e:
-                self._log(f"[Live AI] Няма изход за звук ({e}) — ще виждаш само текста.")
+                self._log(
+                    f"[Live AI] НЯМА ИЗХОД ЗА ЗВУК ({e}) — ще виждаш само текста. "
+                    "Пробвай друго устройство от 'Изход за звука на AI-то'."
+                )
 
             async with websockets.connect(url, max_size=None) as ws:
                 self.live_ws = ws
+                session_started = time.time()
                 if self.live_resume_handle:
                     self._log("[Live AI] WebSocket отворен. Продължавам предишната сесия...")
                 else:
@@ -2345,7 +2494,10 @@ class App(ctk.CTk):
                         "generationConfig": {
                             "responseModalities": ["AUDIO"],
                             "speechConfig": {
-                                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}
+                                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}},
+                                # БЕЗ това Gemini понякога разпознава българския
+                                # като полски или руски и не те разбира.
+                                "languageCode": "bg-BG",
                             },
                         },
                         # Транскрипциите ни дават да видим в лога какво е чуло
@@ -2361,6 +2513,13 @@ class App(ctk.CTk):
                         # Позволява да продължим СЪЩАТА сесия след като сървърът
                         # пресече връзката (той го прави на всеки ~10 минути),
                         # без AI-то да губи контекста на разговора.
+                        # Автоматично засичане кога започваш и спираш да говориш
+                        "realtimeInputConfig": {
+                            "automaticActivityDetection": {
+                                "disabled": False,
+                                "silenceDurationMs": 800,
+                            }
+                        },
                         "sessionResumption": (
                             {"handle": self.live_resume_handle}
                             if self.live_resume_handle else {}
@@ -2384,6 +2543,15 @@ class App(ctk.CTk):
                 self._set_status(self.live_status_label, "● Live AI активен", OK_COLOR)
 
                 await asyncio.gather(sender(ws), receiver(ws, out_stream))
+
+                # Точната причина за затваряне — това е ключът към диагнозата
+                try:
+                    code = getattr(ws, "close_code", None)
+                    reason = getattr(ws, "close_reason", None)
+                    if code is not None:
+                        self._log(f"[Live AI] Сървърът затвори връзката: код {code}, причина: {reason or '(няма)'}")
+                except Exception:
+                    pass
 
             if out_stream is not None:
                 try:
@@ -2426,6 +2594,12 @@ class App(ctk.CTk):
         finally:
             self.live_ws = None
             self._stop_mic()
+
+            try:
+                lasted = round(time.time() - session_started)
+                self._log(f"[Live AI] Сесията издържа {lasted} сек. ({round(lasted/60, 1)} мин.)")
+            except Exception:
+                pass
 
             # Автоматично пресвързване, ако връзката е паднала сама
             if self.live_running and self.live_autoreconnect_var.get():
