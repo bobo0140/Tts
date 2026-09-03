@@ -332,6 +332,22 @@ class GeminiError(Exception):
     pass
 
 
+class SetupRejected(Exception):
+    """Сървърът отхвърли setup-а — пробваме с по-малко допълнителни полета."""
+    pass
+
+
+# Нивата се пробват отгоре надолу. Ако модел не поддържа някое поле, целият
+# setup се отхвърля — затова смъкваме постепенно, вместо да гадаем.
+SETUP_LEVELS = [
+    "всичко включено",
+    "без езиков код",
+    "без засичане на говор",
+    "без компресия и продължаване",
+    "минимален",
+]
+
+
 # --------------------------------------------------------------------------
 # Gemini Live API (говор-към-говор, реално време)
 # --------------------------------------------------------------------------
@@ -554,6 +570,7 @@ class App(ctk.CTk):
         self.live_mic_stream = None
         self.live_resume_handle = None   # талон за продължаване на същата Live сесия
         self.live_send_stream_end = False
+        self.live_setup_level = 0        # кое ниво на setup работи за този ключ/модел
         self.muted = False               # заглушаване: спира звука, но НЕ къса връзките
         self.mic_active = False          # обикновен флаг — чете се от аудио нишката
         self.mic_chunks_sent = 0
@@ -2158,6 +2175,7 @@ class App(ctk.CTk):
     def stop_live_ai(self):
         self.live_running = False
         self.live_resume_handle = None   # ръчно спиране = нова сесия следващия път
+        self.live_setup_level = 0
         self._stop_mic()
         if self.live_loop and self.live_ws:
             try:
@@ -2505,6 +2523,47 @@ class App(ctk.CTk):
             else:
                 self._log(f"[Live AI] Микрофонът е изключен (изпратени ~{secs} сек. звук).")
 
+    def _build_setup(self, model: str, voice: str, level: int) -> dict:
+        """Сглобява setup-а за дадено ниво. По-високо ниво = по-малко полета."""
+        streamer = self.streamer_name_entry.get().strip()
+
+        speech_config = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
+        # Езиковият код помага Gemini да не бърка българския с полски, но
+        # native-audio моделите не го поддържат — затова пада първи.
+        if level < 1:
+            speech_config["languageCode"] = "bg-BG"
+
+        setup = {
+            "model": f"models/{model}",
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": speech_config,
+            },
+            "systemInstruction": {
+                "parts": [{"text": LIVE_SYSTEM_PROMPT + streamer_line(streamer)}]
+            },
+        }
+
+        if level < 4:
+            setup["inputAudioTranscription"] = {}
+            setup["outputAudioTranscription"] = {}
+
+        if level < 2:
+            setup["realtimeInputConfig"] = {
+                "automaticActivityDetection": {"disabled": False, "silenceDurationMs": 800}
+            }
+
+        if level < 3:
+            setup["contextWindowCompression"] = {
+                "slidingWindow": {},
+                "triggerTokens": "25600",
+            }
+            setup["sessionResumption"] = (
+                {"handle": self.live_resume_handle} if self.live_resume_handle else {}
+            )
+
+        return setup
+
     def _run_live_client(self, api_key: str):
         import base64
         import websockets
@@ -2622,7 +2681,7 @@ class App(ctk.CTk):
                     if text:
                         self._log(f"[Live AI] {text}")
 
-        async def run():
+        async def run(level):
             out_stream = None
             try:
                 import sounddevice as sd
@@ -2641,49 +2700,13 @@ class App(ctk.CTk):
             async with websockets.connect(url, max_size=None) as ws:
                 self.live_ws = ws
                 session_started = time.time()
+                session_started = time.time()
                 if self.live_resume_handle:
                     self._log("[Live AI] WebSocket отворен. Продължавам предишната сесия...")
                 else:
                     self._log(f"[Live AI] WebSocket отворен. Нова сесия с модел '{model}'...")
-                await ws.send(json.dumps({
-                    "setup": {
-                        "model": f"models/{model}",
-                        "generationConfig": {
-                            "responseModalities": ["AUDIO"],
-                            "speechConfig": {
-                                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}},
-                                # БЕЗ това Gemini понякога разпознава българския
-                                # като полски или руски и не те разбира.
-                                "languageCode": "bg-BG",
-                            },
-                        },
-                        # Транскрипциите ни дават да видим в лога какво е чуло
-                        # AI-то и какво е казало — без тях се работи на сляпо.
-                        "inputAudioTranscription": {},
-                        "outputAudioTranscription": {},
-                        # Без компресия сесията умира след ~15 мин (пълни се
-                        # контекстът от 128k токена). С нея е неограничена.
-                        "contextWindowCompression": {
-                            "slidingWindow": {},
-                            "triggerTokens": "25600",
-                        },
-                        # Позволява да продължим СЪЩАТА сесия след като сървърът
-                        # пресече връзката (той го прави на всеки ~10 минути),
-                        # без AI-то да губи контекста на разговора.
-                        # Автоматично засичане кога започваш и спираш да говориш
-                        "realtimeInputConfig": {
-                            "automaticActivityDetection": {
-                                "disabled": False,
-                                "silenceDurationMs": 800,
-                            }
-                        },
-                        "sessionResumption": (
-                            {"handle": self.live_resume_handle}
-                            if self.live_resume_handle else {}
-                        ),
-                        "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT + streamer_line(streamer)}]},
-                    }
-                }))
+
+                await ws.send(json.dumps({"setup": self._build_setup(model, voice, level)}))
 
                 first = await asyncio.wait_for(ws.recv(), timeout=20)
                 try:
@@ -2692,10 +2715,15 @@ class App(ctk.CTk):
                     first_msg = {"raw": str(first)[:300]}
 
                 if "setupComplete" not in first_msg:
-                    self._log(f"[Live AI] Сървърът отговори неочаквано: {first_msg}")
+                    self._log(f"[Live AI] Сървърът отхвърли setup-а: {first_msg}")
+                    raise SetupRejected(str(first_msg)[:200])
+
+                if level > 0:
+                    self._log(f"[Live AI] Setup приет на ниво {level} ({SETUP_LEVELS[level]}).")
                 else:
                     self._log("[Live AI] Setup потвърден от сървъра.")
 
+                self.live_setup_level = level   # запомняме кое ниво работи
                 self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
                 self._set_status(self.live_status_label, "● Live AI активен", OK_COLOR)
 
@@ -2718,7 +2746,28 @@ class App(ctk.CTk):
                     pass
 
         try:
-            self.live_loop.run_until_complete(run())
+            # Пробваме от запомненото ниво надолу, докато сървърът приеме setup-а.
+            start_level = getattr(self, "live_setup_level", 0)
+            last_error = None
+            for level in range(start_level, len(SETUP_LEVELS)):
+                try:
+                    self.live_loop.run_until_complete(run(level))
+                    last_error = None
+                    break
+                except SetupRejected as e:
+                    last_error = e
+                    if level + 1 < len(SETUP_LEVELS):
+                        self._log(
+                            f"[Live AI] Ниво '{SETUP_LEVELS[level]}' не се приема — "
+                            f"пробвам '{SETUP_LEVELS[level + 1]}'..."
+                        )
+                    continue
+            if last_error is not None:
+                self._log(
+                    "[Live AI] Никоя комбинация не се приема. Най-вероятно моделът е "
+                    "недостъпен за твоя ключ — пробвай друг от падащото меню, или "
+                    "пусни '🔌 Тест връзка с Gemini' в таб 'Тест'."
+                )
         except asyncio.TimeoutError:
             self._log("[Live AI грешка] Сървърът не отговори на setup за 20 секунди.")
         except Exception as e:
