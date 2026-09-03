@@ -587,6 +587,10 @@ class App(ctk.CTk):
         self.live_resume_handle = None   # талон за продължаване на същата Live сесия
         self.live_send_stream_end = False
         self.live_setup_level = 0        # кое ниво на setup работи за този ключ/модел
+        # Координация на ходовете — кой говори в момента
+        self.half_duplex = True            # обикновен флаг за аудио нишката
+        self.live_model_speaking = False   # AI-то говори
+        self.live_last_voice_ts = 0.0      # кога за последно се чу глас в микрофона
         self.muted = False               # заглушаване: спира звука, но НЕ къса връзките
         self.mic_active = False          # обикновен флаг — чете се от аудио нишката
         self.mic_chunks_sent = 0
@@ -1128,6 +1132,18 @@ class App(ctk.CTk):
         ctk.CTkCheckBox(
             tab, text="Пусни микрофона", variable=self.live_mic_var, command=self._on_mic_toggle
         ).pack(anchor="w", padx=8, pady=5)
+
+        self.half_duplex_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            tab, text="Избягвай ехо (спира микрофона, докато AI-то говори)",
+            variable=self.half_duplex_var,
+        ).pack(anchor="w", padx=8, pady=5)
+        self._hint(
+            tab,
+            "Ако слушаш през КОЛОНКИ, гласът на AI-то влиза обратно в микрофона, "
+            "моделът чува сам себе си и се обърква. Тази отметка го предотвратява. "
+            "Със слушалки може да я изключиш и да прекъсваш AI-то, докато говори.",
+        )
 
         row = self._row(tab, "Устройство:")
         self.mic_device_menu = ctk.CTkOptionMenu(row, values=["(по подразбиране)"])
@@ -1793,7 +1809,7 @@ class App(ctk.CTk):
         "announce_viewers_var", "ai_enabled_var", "ai_speak_var",
         "live_feed_follow_var", "live_feed_share_var", "live_feed_gift_var",
         "live_feed_comment_var", "live_feed_viewers_var", "live_autoreconnect_var",
-        "debug_var",
+        "debug_var", "half_duplex_var",
     ]
     SETTINGS_MENUS = [
         "connection_mode", "output_mode", "voice_engine_menu", "voice_effect_menu",
@@ -2014,7 +2030,9 @@ class App(ctk.CTk):
                 "output_mode": self.output_mode.get(),
                 "live_volume": float(self.live_volume_slider.get()),
                 "debug": bool(self.debug_var.get()),
+                "half_duplex": bool(self.half_duplex_var.get()),
             }
+            self.half_duplex = self.cfg["half_duplex"]
         except Exception:
             pass  # прозорецът се затваря — кешът остава последно известния
         self.after(300, self._refresh_cfg)
@@ -2708,9 +2726,27 @@ class App(ctk.CTk):
         def callback(indata, frames, time_info, status):
             # ВАЖНО: тук НЕ четем tkinter променливи — този callback се изпълнява
             # в аудио нишката на PortAudio и tkinter не е thread-safe.
-            if self.live_running and self.mic_active:
-                self.live_mic_queue.put(bytes(indata))
-                self.mic_chunks_sent += 1
+            if not (self.live_running and self.mic_active):
+                return
+
+            chunk = bytes(indata)
+
+            # Засичаме дали наистина говориш (за координация на ходовете)
+            try:
+                arr = np.frombuffer(chunk, dtype=np.int16)
+                if arr.size and float(np.abs(arr).mean()) > 400:
+                    self.live_last_voice_ts = time.time()
+            except Exception:
+                pass
+
+            # Полудуплекс: докато AI-то говори, НЕ пращаме звук от микрофона.
+            # Иначе гласът му излиза от колонките, влиза обратно и моделът
+            # решава, че ти го прекъсваш — обърква се напълно.
+            if self.half_duplex and self.live_model_speaking:
+                return
+
+            self.live_mic_queue.put(chunk)
+            self.mic_chunks_sent += 1
 
         try:
             self.live_mic_stream = sd.RawInputStream(
@@ -2829,9 +2865,14 @@ class App(ctk.CTk):
                     self._log("[Live AI] Край на говора — чакам отговор.")
                     sent_something = True
 
-                # текстови събития от стрийма
+                # Текстови събития — пращаме ги САМО когато никой не говори.
+                # Ако ги пуснем по средата на ход, Live API се обърква и
+                # спира да отговаря.
+                user_speaking = (time.time() - self.live_last_voice_ts) < 1.5
+                busy = self.live_model_speaking or user_speaking
+
                 try:
-                    while True:
+                    while not busy:
                         text = self.live_text_queue.get_nowait()
                         self._dbg("→", {"clientContent": text})
                         await ws.send(json.dumps({
@@ -2877,8 +2918,10 @@ class App(ctk.CTk):
                 server_content = msg.get("serverContent") or {}
 
                 if server_content.get("interrupted"):
+                    self.live_model_speaking = False
                     self._log("[Live AI] Прекъснат (заговорил си докато AI-то говори).")
                 if server_content.get("turnComplete"):
+                    self.live_model_speaking = False
                     self._log("[Live AI] Ходът е завършен.")
 
                 in_tr = (server_content.get("inputTranscription") or {}).get("text")
@@ -2892,6 +2935,8 @@ class App(ctk.CTk):
                 for part in model_turn.get("parts", []):
                     inline = part.get("inlineData") or {}
                     data_b64 = inline.get("data")
+                    if data_b64:
+                        self.live_model_speaking = True
                     if data_b64 and out_stream is not None and not self.muted:
                         try:
                             pcm = base64.b64decode(data_b64)
