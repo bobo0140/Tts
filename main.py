@@ -1173,6 +1173,7 @@ class App(ctk.CTk):
             ("👥 Наплив последователи", self._test_burst_follows),
             ("🔁 Наплив споделяния", self._test_burst_shares),
             ("🌹 Наплив подаръци", self._test_burst_gifts),
+            ("🔂 Серия подаръци (streak)", self._test_gift_streak),
             ("💬 Наплив коментари", self._test_burst_comments),
         ]
         for i, (text, cmd) in enumerate(bursts):
@@ -1216,8 +1217,25 @@ class App(ctk.CTk):
         self._on_share_event(self._test_name(), "test_user")
 
     def _test_gift(self):
-        self._log("--- ТЕСТ: подарък ---")
-        self._on_gift_shoutout(self._test_name(), "Роза")
+        self._log("--- ТЕСТ: подарък (единичен) ---")
+        self._on_gift_shoutout(self._test_name(), "Роза", 1)
+
+    def _test_gift_streak(self):
+        """Симулира серия: TikTok праща 5 междинни събития и 1 финално.
+        Правилното поведение е ЕДНО обявяване, с бройка 5."""
+        self._log("--- ТЕСТ: серия подаръци (5 междинни + 1 финално) ---")
+        name = self._test_name()
+        for i in range(1, 6):
+            fake = {"event": "gift", "data": {
+                "nickname": name, "uniqueId": "test_user", "giftName": "Роза",
+                "giftType": 1, "repeatEnd": False, "repeatCount": i,
+            }}
+            self._handle_tikfinity_event(fake)
+        final = {"event": "gift", "data": {
+            "nickname": name, "uniqueId": "test_user", "giftName": "Роза",
+            "giftType": 1, "repeatEnd": True, "repeatCount": 5,
+        }}
+        self._handle_tikfinity_event(final)
 
     def _test_heart_me(self):
         self._log("--- ТЕСТ: Heart Me подарък ---")
@@ -2421,20 +2439,26 @@ class App(ctk.CTk):
             return
         self._announce(f"{nickname} сподели стрийма!")
 
-    def _on_gift_shoutout(self, nickname: str, gift_name: str):
+    def _on_gift_shoutout(self, nickname: str, gift_name: str, count: int = 1):
         gn = (gift_name or "").strip()
         if gn.lower() == HEART_ME_GIFT_NAME:
             return  # Heart Me си има собствена логика, не го обявяваме отделно
 
+        count = max(1, int(count or 1))
+        label = f"{gn} x{count}" if count > 1 else gn
+
         if self.live_running and self.live_feed_gift_var.get() and gn:
-            self._feed_live("gift", f"{nickname} — {gn}")
+            self._feed_live("gift", f"{nickname} — {label}")
 
         if (
             self.announce_gift_var.get()
             and gn
             and is_reasonable_name(nickname, self._get_max_name_len())
         ):
-            self._announce(f"{nickname} прати подарък {gn}!")
+            if count > 1:
+                self._announce(f"{nickname} прати {count} пъти {gn}!")
+            else:
+                self._announce(f"{nickname} прати подарък {gn}!")
 
     def _on_viewer_count_event(self, viewer_count):
         if viewer_count is None:
@@ -2690,11 +2714,16 @@ class App(ctk.CTk):
             self._process_incoming_comment(nickname, user_key, comment, is_subscriber)
 
         elif event_name == "gift":
+            # Същата логика за серии, но с имената на полетата от TikFinity
+            if int(data.get("giftType") or 0) == 1 and not data.get("repeatEnd"):
+                return  # серията още тече
+
             nickname = data.get("nickname") or data.get("uniqueId") or "???"
             user_key = data.get("uniqueId") or str(data.get("userId") or "")
             gift_name = data.get("giftName") or ""
+            count = int(data.get("repeatCount") or 1)
             self._register_heart_me_gift(nickname, user_key, gift_name)
-            self._on_gift_shoutout(nickname, gift_name)
+            self._on_gift_shoutout(nickname, gift_name, count)
 
         elif event_name == "follow":
             nickname = data.get("nickname") or data.get("uniqueId") or "???"
@@ -2748,12 +2777,22 @@ class App(ctk.CTk):
         async def on_gift(event: GiftEvent):
             if not event.user or not event.gift:
                 return
+
+            # TikTok праща МНОГО междинни събития, докато трае серия (streak) —
+            # за един и същ подарък. Броим само финалното, иначе един подарък
+            # излиза изпратен по няколко пъти.
+            streakable = bool(getattr(event.gift, "streakable", False))
+            repeat_end = int(getattr(event, "repeat_end", 0) or 0)
+            if streakable and repeat_end != 1:
+                return  # серията още тече — чакаме края
+
+            count = int(getattr(event, "repeat_count", 0) or 1)
             user_key = getattr(event.user, "unique_id", None) or str(
                 getattr(event.user, "user_id", "")
             )
             gift_name = event.gift.name or ""
             self._register_heart_me_gift(event.user.nickname, user_key, gift_name)
-            self._on_gift_shoutout(event.user.nickname, gift_name)
+            self._on_gift_shoutout(event.user.nickname, gift_name, count)
 
         @client.on(FollowEvent)
         async def on_follow(event: FollowEvent):
