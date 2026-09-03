@@ -888,15 +888,15 @@ class App(ctk.CTk):
 
         self._section(tab, "Гласови обявявания", "Освен коментарите, какво друго да казва на глас.")
 
-        self.announce_follow_var = ctk.BooleanVar(value=False)
+        self.announce_follow_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(tab, text="Нови последователи", variable=self.announce_follow_var).pack(
             anchor="w", padx=8, pady=5
         )
-        self.announce_share_var = ctk.BooleanVar(value=False)
+        self.announce_share_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(tab, text="Споделяния (веднъж на човек)", variable=self.announce_share_var).pack(
             anchor="w", padx=8, pady=5
         )
-        self.announce_gift_var = ctk.BooleanVar(value=False)
+        self.announce_gift_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(tab, text="Подаръци (без Heart Me)", variable=self.announce_gift_var).pack(
             anchor="w", padx=8, pady=5
         )
@@ -1227,24 +1227,50 @@ class App(ctk.CTk):
     def _test_name(self) -> str:
         return self.test_name_entry.get().strip() or "ТестовПотребител"
 
+    def _test_precheck(self, what: str, tts_var, live_var=None) -> None:
+        """Казва предварително какво ще се случи — за да не изглежда, че
+        бутонът 'не прави нищо', когато съответната отметка е изключена."""
+        problems = []
+
+        if tts_var is not None and not tts_var.get():
+            problems.append(f"обявяването на {what} е ИЗКЛЮЧЕНО (таб 'Глас')")
+        elif tts_var is not None and not self._speech_allowed("tts"):
+            mode = self._cfg("output_mode") or self.output_mode.get()
+            problems.append(f"режимът е '{mode}', затова локалният глас мълчи")
+        elif self.muted:
+            problems.append("звукът е ЗАГЛУШЕН (🔇 горе)")
+
+        if live_var is not None:
+            if not self.live_running:
+                problems.append("Live AI не е свързан")
+            elif not live_var.get():
+                problems.append(f"подаването на {what} към Live AI е изключено")
+
+        if problems:
+            self._log("   ⚠ Няма да чуеш нищо, защото: " + "; ".join(problems) + ".")
+
     def _test_comment(self):
         name = self._test_name()
         text = self.test_comment_entry.get().strip() or "тестов коментар"
         self._log("--- ТЕСТ: коментар ---")
+        self._test_precheck("коментари", None, self.live_feed_comment_var)
         self._process_incoming_comment(name, "test_user", text, False)
 
     def _test_follow(self):
         self._log("--- ТЕСТ: нов последовател ---")
+        self._test_precheck("нови последователи", self.announce_follow_var, self.live_feed_follow_var)
         self._on_follow_event(self._test_name())
 
     def _test_share(self):
         self._log("--- ТЕСТ: споделяне ---")
+        self._test_precheck("споделяния", self.announce_share_var, self.live_feed_share_var)
         # Чистим защитата от повторение, за да работи тестът всеки път
         self.announced_sharers.discard("test_user")
         self._on_share_event(self._test_name(), "test_user")
 
     def _test_gift(self):
         self._log("--- ТЕСТ: подарък (единичен) ---")
+        self._test_precheck("подаръци", self.announce_gift_var, self.live_feed_gift_var)
         self._on_gift_shoutout(self._test_name(), "Роза", 1)
 
     def _test_gift_streak(self):
@@ -1272,6 +1298,7 @@ class App(ctk.CTk):
 
     def _test_viewers(self):
         self._log("--- ТЕСТ: брой зрители ---")
+        self._test_precheck("брой зрители", self.announce_viewers_var, self.live_feed_viewers_var)
         self.last_viewer_announcement_time = 0.0  # за да не го спре throttle-ът
         self._on_viewer_count_event(123)
 
