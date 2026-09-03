@@ -393,6 +393,11 @@ def call_gemini(api_key: str, model: str, nickname: str, comment: str,
     Хвърля GeminiError с четимо съобщение при проблем."""
     if not api_key:
         raise GeminiError("Липсва Gemini API ключ.")
+    if any(not (32 < ord(c) < 127) for c in api_key):
+        raise GeminiError(
+            "Ключът съдържа непозволени знаци (кирилица, интервал или нов ред). "
+            "Изтрий полето и го постави наново."
+        )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     prompt = (
@@ -1183,6 +1188,24 @@ class App(ctk.CTk):
             )
         grid.grid_columnconfigure((0, 1), weight=1)
 
+        self._section(
+            tab, "Диагностика на API",
+            "Debug режимът показва суровите заявки и отговори към Gemini — това дава "
+            "точната причина, вместо да гадаем.",
+        )
+
+        self.debug_var = ctk.BooleanVar(value=False)
+        ctk.CTkCheckBox(
+            tab, text="Debug режим (показвай сурови API заявки и отговори)",
+            variable=self.debug_var,
+        ).pack(anchor="w", padx=8, pady=6)
+
+        ctk.CTkButton(
+            tab, text="🔬  Пълна проверка на API (стъпка по стъпка)",
+            command=self._test_api_full, height=38, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(anchor="w", padx=8, pady=(4, 12))
+
         self._section(tab, "AI тестове", "Изискват Gemini ключ. Започни с проверката на връзката.")
 
         ai_grid = ctk.CTkFrame(tab, fg_color="transparent")
@@ -1438,6 +1461,178 @@ class App(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _test_api_full(self):
+        """Проверява целия път до Gemini стъпка по стъпка, с времена и сурови
+        отговори — за да се види ТОЧНО къде се къса."""
+        api_key = self.gemini_api_key_entry.get().strip()
+        text_model = self.gemini_model_entry.get().strip() or TEXT_MODELS[0]
+        live_model = self.live_model_entry.get().strip() or LIVE_MODELS[0]
+
+        self._log("=" * 46)
+        self._log("ПЪЛНА ПРОВЕРКА НА API")
+        self._log("=" * 46)
+
+        if not api_key:
+            self._log("✗ СТЪПКА 1: Няма ключ. Сложи го горе в таб 'AI'.")
+            return
+        bad = [c for c in api_key if not (32 < ord(c) < 127)]
+        if bad:
+            self._log(
+                f"✗ СТЪПКА 1: Ключът съдържа непозволени знаци "
+                f"(напр. кирилица или интервал): {bad[:5]}. "
+                "Изтрий полето и постави ключа наново."
+            )
+            return
+        self._log(f"✓ СТЪПКА 1: Ключ е наличен ({len(api_key)} знака, започва с '{api_key[:6]}…').")
+
+        def worker():
+            # --- 2: списък с модели (проверява дали ключът е валиден) ---
+            t0 = time.time()
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+            self._dbg("→", f"GET /v1beta/models")
+            try:
+                with urllib.request.urlopen(url, timeout=20) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                ms = round((time.time() - t0) * 1000)
+                models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+                self._log(f"✓ СТЪПКА 2: Ключът е валиден. {len(models)} модела, отговор за {ms} ms.")
+                self._dbg("←", models[:12])
+
+                if text_model in models:
+                    self._log(f"✓ СТЪПКА 3: Текстовият модел '{text_model}' е достъпен.")
+                else:
+                    self._log(f"✗ СТЪПКА 3: '{text_model}' НЕ е в списъка — смени го от менюто.")
+                    close = [m for m in models if "flash" in m][:5]
+                    if close:
+                        self._log(f"   Налични подобни: {', '.join(close)}")
+
+                if live_model in models:
+                    self._log(f"✓ СТЪПКА 4: Live моделът '{live_model}' е достъпен.")
+                else:
+                    self._log(f"✗ СТЪПКА 4: '{live_model}' НЕ е в списъка за твоя ключ.")
+                    live_avail = [m for m in models if "live" in m or "native-audio" in m][:6]
+                    if live_avail:
+                        self._log(f"   Опитай с: {', '.join(live_avail)}")
+                    else:
+                        self._log("   Ключът ти няма достъп до НИКАКВИ Live модели.")
+            except urllib.error.HTTPError as e:
+                body = e.read().decode("utf-8", errors="ignore")[:300]
+                self._log(f"✗ СТЪПКА 2: Ключът е отхвърлен — HTTP {e.code}.")
+                self._dbg("←", body)
+                return
+            except Exception as e:
+                self._log(f"✗ СТЪПКА 2: Няма връзка с Google: {e}")
+                return
+
+            # --- 5: реална текстова заявка ---
+            t0 = time.time()
+            self._log("… СТЪПКА 5: Пращам истинска текстова заявка...")
+            try:
+                reply = call_gemini(api_key, text_model, "Тест", "Кажи 'работи' и нищо друго.")
+                ms = round((time.time() - t0) * 1000)
+                self._log(f"✓ СТЪПКА 5: Отговор за {ms} ms: \"{reply[:100]}\"")
+            except GeminiError as e:
+                self._log(f"✗ СТЪПКА 5: {e}")
+                return
+
+            # --- 6: Live WebSocket ---
+            self._log("… СТЪПКА 6: Отварям Live WebSocket...")
+            self._test_live_handshake(api_key, live_model)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _test_live_handshake(self, api_key: str, model: str):
+        """Отваря Live връзка, праща setup и текстов ход, чака отговор."""
+        import websockets
+
+        async def probe():
+            url = LIVE_WS_URL.format(key=api_key)
+            for level in range(len(SETUP_LEVELS)):
+                try:
+                    t0 = time.time()
+                    async with websockets.connect(url, max_size=None) as ws:
+                        setup = self._build_setup(model, self.live_voice_menu.get(), level)
+                        self._dbg("→", {"setup": setup})
+                        await ws.send(json.dumps({"setup": setup}))
+
+                        first = await asyncio.wait_for(ws.recv(), timeout=20)
+                        self._dbg("←", first)
+                        msg = json.loads(first) if isinstance(first, str) else {}
+
+                        if "setupComplete" not in msg:
+                            self._log(f"  ✗ Ниво '{SETUP_LEVELS[level]}' — отхвърлено.")
+                            continue
+
+                        ms = round((time.time() - t0) * 1000)
+                        self._log(
+                            f"✓ СТЪПКА 6: Live връзката работи на ниво "
+                            f"'{SETUP_LEVELS[level]}' ({ms} ms)."
+                        )
+                        self.live_setup_level = level
+
+                        # --- 7: истински ход, за да видим отговаря ли ---
+                        self._log("… СТЪПКА 7: Пращам текст и чакам аудио отговор...")
+                        turn = {"clientContent": {
+                            "turns": [{"role": "user", "parts": [{"text": "Кажи здравей съвсем кратко."}]}],
+                            "turnComplete": True,
+                        }}
+                        self._dbg("→", turn)
+                        await ws.send(json.dumps(turn))
+
+                        audio_bytes, texts, t1 = 0, [], time.time()
+                        while time.time() - t1 < 20:
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=20)
+                            except asyncio.TimeoutError:
+                                break
+                            self._dbg("←", raw)
+                            m = json.loads(raw) if isinstance(raw, str) else {}
+                            sc = m.get("serverContent") or {}
+                            for p in (sc.get("modelTurn") or {}).get("parts", []):
+                                d = (p.get("inlineData") or {}).get("data")
+                                if d:
+                                    audio_bytes += len(d)
+                                if p.get("text"):
+                                    texts.append(p["text"])
+                            tr = (sc.get("outputTranscription") or {}).get("text")
+                            if tr:
+                                texts.append(tr)
+                            if sc.get("turnComplete"):
+                                break
+
+                        if audio_bytes:
+                            secs = round(audio_bytes * 0.75 / 2 / LIVE_OUTPUT_RATE, 1)
+                            self._log(
+                                f"✓ СТЪПКА 7: Получено аудио (~{secs} сек). "
+                                "API-то работи напълно."
+                            )
+                            if texts:
+                                self._log(f"   AI каза: \"{' '.join(texts)[:120]}\"")
+                            self._log("   Ако не си го чул — проблемът е в звука, не в API.")
+                        else:
+                            self._log(
+                                "✗ СТЪПКА 7: Няма аудио в отговора. Моделът приема "
+                                "връзката, но не генерира звук."
+                            )
+                            if texts:
+                                self._log(f"   Само текст: \"{' '.join(texts)[:120]}\"")
+                        return
+                except Exception as e:
+                    self._log(f"  ✗ Ниво '{SETUP_LEVELS[level]}': {type(e).__name__}: {str(e)[:120]}")
+                    continue
+
+            self._log("✗ СТЪПКА 6: Никое ниво не проработи — виж грешките по-горе.")
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(probe())
+        except Exception as e:
+            self._log(f"✗ Live проверка се провали: {e}")
+        finally:
+            loop.close()
+            self._log("=" * 46)
+
     def _test_microphone(self):
         """Записва 3 секунди от микрофона и показва дали изобщо влиза звук."""
         self._log("--- ТЕСТ: микрофон (3 секунди, говори сега) ---")
@@ -1586,6 +1781,7 @@ class App(ctk.CTk):
         "announce_viewers_var", "ai_enabled_var", "ai_speak_var",
         "live_feed_follow_var", "live_feed_share_var", "live_feed_gift_var",
         "live_feed_comment_var", "live_feed_viewers_var", "live_autoreconnect_var",
+        "debug_var",
     ]
     SETTINGS_MENUS = [
         "connection_mode", "output_mode", "voice_engine_menu", "voice_effect_menu",
@@ -1805,6 +2001,7 @@ class App(ctk.CTk):
                 "shuffle_pool": [k for k, v in self.shuffle_vars.items() if v.get()],
                 "output_mode": self.output_mode.get(),
                 "live_volume": float(self.live_volume_slider.get()),
+                "debug": bool(self.debug_var.get()),
             }
         except Exception:
             pass  # прозорецът се затваря — кешът остава последно известния
@@ -1880,6 +2077,21 @@ class App(ctk.CTk):
             self._log(f"[Лог] Запазен във {path.name} (до приложението).")
         except Exception as e:
             self._log(f"[Лог] Грешка при запазване: {e}")
+
+    def _dbg(self, direction: str, payload):
+        """Логва сурова API заявка/отговор, ако debug режимът е включен.
+        direction: '→' (изпратено) или '←' (получено)."""
+        # чете се от кеша, защото се вика и от фонови нишки
+        if not self._cfg("debug", False):
+            return
+        try:
+            text = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+        except Exception:
+            text = str(payload)
+        limit = 400
+        if len(text) > limit:
+            text = text[:limit] + f"… (+{len(text) - limit} знака)"
+        self._log(f"  [DEBUG {direction}] {text}")
 
     def _clear_log(self):
         self.log_box.configure(state="normal")
@@ -2609,6 +2821,7 @@ class App(ctk.CTk):
                 try:
                     while True:
                         text = self.live_text_queue.get_nowait()
+                        self._dbg("→", {"clientContent": text})
                         await ws.send(json.dumps({
                             "clientContent": {
                                 "turns": [{"role": "user", "parts": [{"text": text}]}],
@@ -2631,6 +2844,8 @@ class App(ctk.CTk):
                     msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
                     continue
+
+                self._dbg("←", msg)
 
                 # Сървърът периодично праща талон, с който можем да продължим
                 # същата сесия след прекъсване — пазим последния.
@@ -2706,9 +2921,12 @@ class App(ctk.CTk):
                 else:
                     self._log(f"[Live AI] WebSocket отворен. Нова сесия с модел '{model}'...")
 
-                await ws.send(json.dumps({"setup": self._build_setup(model, voice, level)}))
+                setup_payload = self._build_setup(model, voice, level)
+                self._dbg("→", {"setup": setup_payload})
+                await ws.send(json.dumps({"setup": setup_payload}))
 
                 first = await asyncio.wait_for(ws.recv(), timeout=20)
+                self._dbg("←", first)
                 try:
                     first_msg = json.loads(first)
                 except (json.JSONDecodeError, TypeError):
@@ -2832,10 +3050,12 @@ class App(ctk.CTk):
             api_key = self._cfg("gemini_key", "")
             model = self._cfg("gemini_model", TEXT_MODELS[0])
             try:
+                self._dbg("→", {"model": model, "user": nickname, "comment": comment})
                 reply = call_gemini(
                     api_key, model, nickname, comment,
                     streamer_name=self._cfg("streamer_name", ""),
                 )
+                self._dbg("←", reply)
                 if reply:
                     self._log(f"[AI] {reply}")
                     if self._cfg("ai_speak", True):
