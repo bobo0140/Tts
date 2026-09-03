@@ -332,6 +332,16 @@ class GeminiError(Exception):
     pass
 
 
+def _parse_ws(raw):
+    """Разчита съобщение от WebSocket — идва като bytes или str."""
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8", errors="replace")
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
 class SetupRejected(Exception):
     """Сървърът отхвърли setup-а — пробваме с по-малко допълнителни полета."""
     pass
@@ -370,7 +380,8 @@ TEXT_MODELS = [
 ]
 
 LIVE_MODELS = [
-    "gemini-3.1-flash-live-preview",                  # препоръчан от Google
+    "gemini-2.5-flash-native-audio-latest",           # най-често достъпен
+    "gemini-3.1-flash-live-preview",
     "gemini-2.5-flash-native-audio-preview-12-2025",
     "gemini-2.5-flash-native-audio-preview-09-2025",
 ]
@@ -1557,7 +1568,8 @@ class App(ctk.CTk):
 
                         first = await asyncio.wait_for(ws.recv(), timeout=20)
                         self._dbg("←", first)
-                        msg = json.loads(first) if isinstance(first, str) else {}
+                        # Сървърът праща байтове, не текст — затова декодираме.
+                        msg = _parse_ws(first)
 
                         if "setupComplete" not in msg:
                             self._log(f"  ✗ Ниво '{SETUP_LEVELS[level]}' — отхвърлено.")
@@ -1586,7 +1598,7 @@ class App(ctk.CTk):
                             except asyncio.TimeoutError:
                                 break
                             self._dbg("←", raw)
-                            m = json.loads(raw) if isinstance(raw, str) else {}
+                            m = _parse_ws(raw)
                             sc = m.get("serverContent") or {}
                             for p in (sc.get("modelTurn") or {}).get("parts", []):
                                 d = (p.get("inlineData") or {}).get("data")
@@ -2840,9 +2852,8 @@ class App(ctk.CTk):
             async for raw in ws:
                 if not self.live_running:
                     break
-                try:
-                    msg = json.loads(raw)
-                except (json.JSONDecodeError, TypeError):
+                msg = _parse_ws(raw)
+                if not msg:
                     continue
 
                 self._dbg("←", msg)
@@ -2927,10 +2938,7 @@ class App(ctk.CTk):
 
                 first = await asyncio.wait_for(ws.recv(), timeout=20)
                 self._dbg("←", first)
-                try:
-                    first_msg = json.loads(first)
-                except (json.JSONDecodeError, TypeError):
-                    first_msg = {"raw": str(first)[:300]}
+                first_msg = _parse_ws(first) or {"raw": str(first)[:300]}
 
                 if "setupComplete" not in first_msg:
                     self._log(f"[Live AI] Сървърът отхвърли setup-а: {first_msg}")
