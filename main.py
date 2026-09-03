@@ -552,6 +552,7 @@ class App(ctk.CTk):
         self.live_text_queue: "queue.Queue" = queue.Queue()   # събития -> AI
         self.live_mic_queue: "queue.Queue" = queue.Queue()    # микрофон -> AI
         self.live_mic_stream = None
+        self.live_resume_handle = None   # талон за продължаване на същата Live сесия
         self.muted = False               # заглушаване: спира звука, но НЕ къса връзките
         self.mic_active = False          # обикновен флаг — чете се от аудио нишката
         self.mic_chunks_sent = 0
@@ -1949,6 +1950,7 @@ class App(ctk.CTk):
 
     def stop_live_ai(self):
         self.live_running = False
+        self.live_resume_handle = None   # ръчно спиране = нова сесия следващия път
         self._stop_mic()
         if self.live_loop and self.live_ws:
             try:
@@ -2276,6 +2278,22 @@ class App(ctk.CTk):
                 except (json.JSONDecodeError, TypeError):
                     continue
 
+                # Сървърът периодично праща талон, с който можем да продължим
+                # същата сесия след прекъсване — пазим последния.
+                resume = msg.get("sessionResumptionUpdate") or {}
+                if resume.get("resumable") and resume.get("newHandle"):
+                    self.live_resume_handle = resume["newHandle"]
+
+                # Предупреждение ~60 сек преди сървърът да пресече връзката
+                go_away = msg.get("goAway")
+                if go_away is not None:
+                    left = go_away.get("timeLeft", "скоро")
+                    self._log(
+                        f"[Live AI] Сървърът ще пресече връзката ({left}). "
+                        "Пресвързвам се и продължавам същата сесия..."
+                    )
+                    break   # излизаме, за да сработи автоматичното пресвързване
+
                 server_content = msg.get("serverContent") or {}
 
                 in_tr = (server_content.get("inputTranscription") or {}).get("text")
@@ -2317,7 +2335,10 @@ class App(ctk.CTk):
 
             async with websockets.connect(url, max_size=None) as ws:
                 self.live_ws = ws
-                self._log(f"[Live AI] WebSocket отворен. Изпращам setup за модел '{model}'...")
+                if self.live_resume_handle:
+                    self._log("[Live AI] WebSocket отворен. Продължавам предишната сесия...")
+                else:
+                    self._log(f"[Live AI] WebSocket отворен. Нова сесия с модел '{model}'...")
                 await ws.send(json.dumps({
                     "setup": {
                         "model": f"models/{model}",
@@ -2331,6 +2352,19 @@ class App(ctk.CTk):
                         # AI-то и какво е казало — без тях се работи на сляпо.
                         "inputAudioTranscription": {},
                         "outputAudioTranscription": {},
+                        # Без компресия сесията умира след ~15 мин (пълни се
+                        # контекстът от 128k токена). С нея е неограничена.
+                        "contextWindowCompression": {
+                            "slidingWindow": {},
+                            "triggerTokens": "25600",
+                        },
+                        # Позволява да продължим СЪЩАТА сесия след като сървърът
+                        # пресече връзката (той го прави на всеки ~10 минути),
+                        # без AI-то да губи контекста на разговора.
+                        "sessionResumption": (
+                            {"handle": self.live_resume_handle}
+                            if self.live_resume_handle else {}
+                        ),
                         "systemInstruction": {"parts": [{"text": LIVE_SYSTEM_PROMPT + streamer_line(streamer)}]},
                     }
                 }))
@@ -2372,8 +2406,17 @@ class App(ctk.CTk):
                 )
             elif "401" in detail or "403" in detail or "API key" in detail:
                 self._log("[Съвет] Ключът изглежда невалиден. Провери го в таб 'AI'.")
-            elif "429" in detail:
-                self._log("[Съвет] Достигнат лимит на безплатното ниво. Изчакай малко.")
+            elif "429" in detail or "RESOURCE_EXHAUSTED" in detail.upper():
+                self._log(
+                    "[Съвет] Достигнат е лимитът на безплатното ниво (429). Изчакай "
+                    "няколко минути. Ако се повтаря често: увеличи 'Групирай на всеки' "
+                    "и 'Коментари на всеки N-ти', за да правиш по-малко заявки."
+                )
+            elif "1011" in detail or "internal" in detail.lower():
+                self._log(
+                    "[Съвет] Вътрешна грешка от сървъра на Google — обикновено минава "
+                    "от само себе си. Автоматичното пресвързване ще опита пак."
+                )
             else:
                 self._log(
                     "[Съвет] Провери интернет връзката и дали ключът е активен. "
@@ -2386,9 +2429,12 @@ class App(ctk.CTk):
 
             # Автоматично пресвързване, ако връзката е паднала сама
             if self.live_running and self.live_autoreconnect_var.get():
-                self._log("[Live AI] Връзката падна — пресвързвам се след 3 секунди...")
-                self._set_status(self.live_status_label, "◌ Live AI пресвързване...", "orange")
-                time.sleep(3)
+                if self.live_resume_handle:
+                    self._log("[Live AI] Пресвързвам се и продължавам сесията...")
+                else:
+                    self._log("[Live AI] Връзката падна — пресвързвам се...")
+                self._set_status(self.live_status_label, "◌ Live AI пресвързване...", WARN_COLOR)
+                time.sleep(1.5)
                 if self.live_running:
                     threading.Thread(
                         target=self._run_live_client, args=(api_key,), daemon=True
