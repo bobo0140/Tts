@@ -1173,6 +1173,7 @@ class App(ctk.CTk):
             ("🔌 Тест връзка с Gemini", self._test_gemini_connection),
             ("🤖 Тест AI коментатор", self._test_ai_commentator),
             ("🎙 Тест микрофон (3 сек)", self._test_microphone),
+            ("🔈 Тест на звука (тон)", self._test_audio_output),
             ("📡 Изпрати към Live AI", self._test_live_feed),
         ]
         for i, (text, cmd) in enumerate(ai_tests):
@@ -1352,6 +1353,41 @@ class App(ctk.CTk):
         name = self._test_name()
         self._log("--- ТЕСТ: съобщение към Live AI ---")
         self._feed_live("follow", name)
+
+    def _test_audio_output(self):
+        """Пуска тестов тон директно, заобикаляйки режима и заглушаването —
+        така се вижда дали изобщо има звук от приложението."""
+        self._log("--- ТЕСТ: звуков изход (кратък тон) ---")
+
+        def worker():
+            try:
+                rate = 22050
+                t = np.arange(int(rate * 0.6), dtype=np.float32) / rate
+                tone = (np.sin(2 * np.pi * 440 * t) * 12000).astype(np.int16)
+                fade = np.linspace(1.0, 0.0, len(tone), dtype=np.float32)
+                tone = (tone * fade).astype(np.int16)
+
+                fd, path = tempfile.mkstemp(suffix=".wav")
+                os.close(fd)
+                with wave.open(path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(rate)
+                    wf.writeframes(tone.tobytes())
+
+                snd = pygame.mixer.Sound(path)
+                ch = snd.play()
+                while ch and ch.get_busy():
+                    time.sleep(0.05)
+                os.remove(path)
+                self._log(
+                    "[Тест] Тонът беше пуснат. Ако НЕ го чу: проблемът е в звуковото "
+                    "устройство или Windows миксера, не в приложението."
+                )
+            except Exception as e:
+                self._log(f"[Тест] Звукът не работи: {e}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _test_microphone(self):
         """Записва 3 секунди от микрофона и показва дали изобщо влиза звук."""
@@ -1606,6 +1642,16 @@ class App(ctk.CTk):
             pass
 
         self._log("[Настройки] Заредени от предишния път.")
+
+        try:
+            v = float(self.volume_slider.get())
+            if v < 0.3:
+                self._log(f"[Внимание] Силата на TTS гласа е много ниска ({v:.2f}x) — таб 'Глас'.")
+            lv = float(self.live_volume_slider.get())
+            if lv < 0.3:
+                self._log(f"[Внимание] Силата на Live AI е много ниска ({lv:.2f}x) — таб 'AI'.")
+        except Exception:
+            pass
 
     def _autosave_settings(self):
         if getattr(self, "_closing", False):
@@ -1869,6 +1915,22 @@ class App(ctk.CTk):
     def _enqueue_latest_only(self, text: str, source: str = "tts"):
         # Режимът решава дали този източник изобщо има право да говори.
         if source != "preview" and not self._speech_allowed(source):
+            # Обясняваме защо мълчи — иначе изглежда като бъг.
+            now = time.time()
+            if now - getattr(self, "_last_suppress_note", 0) > 20:
+                self._last_suppress_note = now
+                mode = self._cfg("output_mode") or self.output_mode.get()
+                self._log(
+                    f"[Тихо] Текстът не се изговаря, защото режимът е '{mode}'. "
+                    "Смени на 'TTS гласове' или 'И двете', ако искаш да го чуваш."
+                )
+            return
+
+        if self.muted:
+            now = time.time()
+            if now - getattr(self, "_last_mute_note", 0) > 20:
+                self._last_mute_note = now
+                self._log("[Тихо] Звукът е ЗАГЛУШЕН (бутонът 🔇 горе или клавиш f9).")
             return
 
         # Изхвърляме всичко чакащо в опашката (все още неизговорено) и слагаме
