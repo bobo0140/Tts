@@ -564,6 +564,7 @@ class App(ctk.CTk):
 
         self._build_ui()
         self._enable_clipboard_everywhere()
+        self._defaults = self._snapshot_settings()   # фабричните стойности
         self._load_settings()
         self.cfg = {}
         self._closing = False
@@ -1215,6 +1216,10 @@ class App(ctk.CTk):
         ctk.CTkButton(
             srow, text="💾 Запази настройките сега", command=self._save_settings, height=34
         ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            srow, text="↺ Върни фабричните настройки", command=self.restore_defaults,
+            height=34, fg_color=ERR_COLOR, hover_color="#DC5555",
+        ).pack(side="left")
         self._hint(
             tab,
             "Настройките се запазват автоматично при затваряне и на всяка минута, "
@@ -1578,47 +1583,46 @@ class App(ctk.CTk):
     def _settings_path(self) -> Path:
         return BASE_DIR / "settings.json"
 
-    def _save_settings(self, silent: bool = False):
+    def _snapshot_settings(self) -> dict:
+        """Прочита текущото състояние на всички контроли."""
         data = {"entries": {}, "bools": {}, "menus": {}, "sliders": {}, "shuffle": {}}
-        try:
-            for name in self.SETTINGS_ENTRIES:
-                w = getattr(self, name, None)
-                if w is not None:
+        for name in self.SETTINGS_ENTRIES:
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
                     data["entries"][name] = w.get()
-            for name in self.SETTINGS_BOOLS:
-                v = getattr(self, name, None)
-                if v is not None:
+                except Exception:
+                    pass
+        for name in self.SETTINGS_BOOLS:
+            v = getattr(self, name, None)
+            if v is not None:
+                try:
                     data["bools"][name] = bool(v.get())
-            for name in self.SETTINGS_MENUS:
-                w = getattr(self, name, None)
-                if w is not None:
+                except Exception:
+                    pass
+        for name in self.SETTINGS_MENUS:
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
                     data["menus"][name] = w.get()
-            for name in self.SETTINGS_SLIDERS:
-                w = getattr(self, name, None)
-                if w is not None:
+                except Exception:
+                    pass
+        for name in self.SETTINGS_SLIDERS:
+            w = getattr(self, name, None)
+            if w is not None:
+                try:
                     data["sliders"][name] = float(w.get())
-            for key, var in getattr(self, "shuffle_vars", {}).items():
+                except Exception:
+                    pass
+        for key, var in getattr(self, "shuffle_vars", {}).items():
+            try:
                 data["shuffle"][key] = bool(var.get())
+            except Exception:
+                pass
+        return data
 
-            self._settings_path().write_text(
-                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-            if not silent:
-                self._log(f"[Настройки] Запазени в {self._settings_path().name}")
-        except Exception as e:
-            if not silent:
-                self._log(f"[Настройки] Грешка при запазване: {e}")
-
-    def _load_settings(self):
-        path = self._settings_path()
-        if not path.exists():
-            return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as e:
-            self._log(f"[Настройки] Не мога да прочета {path.name}: {e}")
-            return
-
+    def _apply_settings(self, data: dict):
+        """Прилага подаден набор настройки върху контролите."""
         for name, value in data.get("entries", {}).items():
             w = getattr(self, name, None)
             if w is not None:
@@ -1656,18 +1660,82 @@ class App(ctk.CTk):
                 except Exception:
                     pass
 
-        # прилагаме заредения режим на свързване (показва/скрива правилните полета)
+        # прилагаме режима на свързване и обновяваме етикетите на плъзгачите
         try:
             self._on_connection_mode_changed(self.connection_mode.get())
         except Exception:
             pass
-
-        # плъзгачите не викат командата си при .set(), затова обновяваме етикета ръчно
         try:
             self.live_volume_label.configure(text=f"{self.live_volume_slider.get():.2f}x")
         except Exception:
             pass
 
+    def restore_defaults(self):
+        """Връща всичко към фабричните настройки и трие запазения файл."""
+        defaults = getattr(self, "_defaults", None)
+        if not defaults:
+            self._log("[Настройки] Няма запазени фабрични стойности.")
+            return
+
+        # спираме всичко активно, за да няма изненади
+        try:
+            if self.live_running:
+                self.stop_live_ai()
+            if self.is_running:
+                self.stop_listening()
+        except Exception:
+            pass
+
+        self.set_muted(False)
+        self._apply_settings(defaults)
+
+        # чистим и натрупаното състояние от сесията
+        self.announced_sharers.clear()
+        self.heart_me_senders.clear()
+        self.confirmed_subscribers.clear()
+        self.recent_comments.clear()
+        with self.live_buffer_lock:
+            self.live_event_buffer.clear()
+        self.ai_comment_counter = 0
+        self.live_comment_counter = 0
+        self.live_resume_handle = None
+        self.last_viewer_announcement_time = 0.0
+
+        try:
+            path = self._settings_path()
+            if path.exists():
+                path.unlink()
+        except Exception as e:
+            self._log(f"[Настройки] Не можах да изтрия файла: {e}")
+
+        self._log(
+            "[Настройки] ✓ Върнати към фабричните. Всичко е чисто. "
+            "ВНИМАНИЕ: API ключовете също са изтрити — въведи ги наново."
+        )
+
+    def _save_settings(self, silent: bool = False):
+        try:
+            data = self._snapshot_settings()
+            self._settings_path().write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            if not silent:
+                self._log(f"[Настройки] Запазени в {self._settings_path().name}")
+        except Exception as e:
+            if not silent:
+                self._log(f"[Настройки] Грешка при запазване: {e}")
+
+    def _load_settings(self):
+        path = self._settings_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self._log(f"[Настройки] Не мога да прочета {path.name}: {e}")
+            return
+
+        self._apply_settings(data)
         self._log("[Настройки] Заредени от предишния път.")
 
         try:
