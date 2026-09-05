@@ -630,6 +630,8 @@ class App(ctk.CTk):
         self.known_moderators = set()
         self.half_duplex = True            # обикновен флаг за аудио нишката
         self.live_model_speaking = False   # AI-то говори
+        self._tr_in = ""                   # буфер за транскрипция (вход)
+        self._tr_out = ""                  # буфер за транскрипция (изход)
         self.live_last_voice_ts = 0.0      # кога за последно се чу глас в микрофона
         self.muted = False               # заглушаване: спира звука, но НЕ къса връзките
         self.mic_active = False          # обикновен флаг — чете се от аудио нишката
@@ -2210,6 +2212,15 @@ class App(ctk.CTk):
             text = text[:limit] + f"… (+{len(text) - limit} знака)"
         self._log(f"  [DEBUG {direction}] {text}")
 
+    def _flush_transcripts(self):
+        """Показва натрупаната транскрипция като един ред."""
+        if self._tr_in.strip():
+            self._log(f"[Чух те] {self._tr_in.strip()}")
+        self._tr_in = ""
+        if self._tr_out.strip():
+            self._log(f"[AI казва] {self._tr_out.strip()}")
+        self._tr_out = ""
+
     def _reset_voice_settings(self):
         """Връща само гласовите настройки по подразбиране — ключовете и
         останалото остават непокътнати."""
@@ -3104,17 +3115,20 @@ class App(ctk.CTk):
 
                 if server_content.get("interrupted"):
                     self.live_model_speaking = False
+                    self._flush_transcripts()
                     self._log("[Live AI] Прекъснат (заговорил си докато AI-то говори).")
                 if server_content.get("turnComplete"):
                     self.live_model_speaking = False
-                    self._log("[Live AI] Ходът е завършен.")
+                    self._flush_transcripts()
 
+                # Транскрипцията идва на малки парчета (дума по дума).
+                # Трупаме ги и ги показваме като едно цяло изречение.
                 in_tr = (server_content.get("inputTranscription") or {}).get("text")
                 if in_tr:
-                    self._log(f"[Чух те] {in_tr}")
+                    self._tr_in += in_tr
                 out_tr = (server_content.get("outputTranscription") or {}).get("text")
                 if out_tr:
-                    self._log(f"[AI казва] {out_tr}")
+                    self._tr_out += out_tr
 
                 model_turn = server_content.get("modelTurn") or {}
                 for part in model_turn.get("parts", []):
@@ -3270,6 +3284,7 @@ class App(ctk.CTk):
                 )
             traceback.print_exc()
         finally:
+            self._flush_transcripts()
             self.live_ws = None
             self._stop_mic()
 
