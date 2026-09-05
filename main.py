@@ -633,6 +633,7 @@ class App(ctk.CTk):
         self.known_moderators = set()
         self.half_duplex = True            # обикновен флаг за аудио нишката
         self.live_model_speaking = False   # AI-то говори
+        self.live_last_audio_ts = 0.0      # кога дойде последното парче звук
         self._tr_in = ""                   # буфер за транскрипция (вход)
         self._tr_out = ""                  # буфер за транскрипция (изход)
         self.live_last_voice_ts = 0.0      # кога за последно се чу глас в микрофона
@@ -3159,6 +3160,13 @@ class App(ctk.CTk):
                 # Текстови събития — пращаме ги САМО когато никой не говори.
                 # Ако ги пуснем по средата на ход, Live API се обърква и
                 # спира да отговаря.
+                # Предпазител: ако сигналът за завършен ход не дойде, флагът
+                # "AI-то говори" би заял завинаги и текстът никога не тръгва.
+                # Затова смятаме хода за приключил и след 2 сек тишина.
+                if self.live_model_speaking and (time.time() - self.live_last_audio_ts) > 2.0:
+                    self.live_model_speaking = False
+                    self._flush_transcripts()
+
                 user_speaking = (time.time() - self.live_last_voice_ts) < 1.5
                 busy = self.live_model_speaking or user_speaking
 
@@ -3231,6 +3239,7 @@ class App(ctk.CTk):
                     data_b64 = inline.get("data")
                     if data_b64:
                         self.live_model_speaking = True
+                        self.live_last_audio_ts = time.time()
                     if data_b64 and out_stream is not None and not self.muted:
                         try:
                             pcm = base64.b64decode(data_b64)
