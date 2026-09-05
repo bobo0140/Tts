@@ -2660,15 +2660,15 @@ class App(ctk.CTk):
             if len(follows) == 1:
                 parts.append(f"Нов последовател: {follows[0]}.")
             else:
-                names = ", ".join(follows[:8])
-                extra = f" и още {len(follows) - 8}" if len(follows) > 8 else ""
-                parts.append(f"{len(follows)} нови последователи: {names}{extra}.")
+                names = ", ".join(follows[:6])
+                extra = f" и още {len(follows) - 6}" if len(follows) > 6 else ""
+                parts.append(f"Нови последователи: {names}{extra}.")
 
         if shares:
             if len(shares) == 1:
                 parts.append(f"{shares[0]} сподели стрийма.")
             else:
-                parts.append(f"{len(shares)} души споделиха стрийма: {', '.join(shares[:8])}.")
+                parts.append(f"Споделиха: {', '.join(shares[:5])}.")
 
         if gifts:
             if len(gifts) == 1:
@@ -2697,14 +2697,16 @@ class App(ctk.CTk):
         if not parts:
             return ""
 
-        parts.append(
-            f"(Общо тази сесия: {self.stat_follows} нови последователи, "
-            f"{self.stat_shares} споделяния, {self.stat_gifts} подаръка.)"
-        )
+        # Общата статистика само от време на време (на всеки 8 съобщения),
+        # иначе AI-то я изрежда постоянно и става досадно.
+        self.batch_count = getattr(self, "batch_count", 0) + 1
+        if self.batch_count % 8 == 0 and self.stat_follows:
+            parts.append(f"(Между другото, вече {self.stat_follows} нови последователи.)")
 
         return (
             " ".join(parts)
-            + " Реагирай общо и кратко на всичко това наведнъж, в едно изказване."
+            + " Реагирай съвсем кратко — едно изречение. Ако има нови последователи, "
+            "казвай имената им. Не изброявай статистики."
         )
 
     def _on_mic_toggle(self):
