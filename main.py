@@ -1425,6 +1425,11 @@ class App(ctk.CTk):
         srow = ctk.CTkFrame(tab, fg_color="transparent")
         srow.pack(fill="x", padx=4, pady=(4, 14))
         ctk.CTkButton(
+            srow, text="⚡ Оптимални настройки", command=self.apply_optimal_settings,
+            height=34, fg_color=ACCENT, hover_color=ACCENT_HOVER,
+            font=ctk.CTkFont(size=13, weight="bold"),
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
             srow, text="💾 Запази настройките сега", command=self._save_settings, height=34
         ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(
@@ -2323,6 +2328,58 @@ class App(ctk.CTk):
 
     def _on_personality_pick(self, value):
         self._log(f"[AI] Характер: {value}. Може да го доуточниш в полето отдолу.")
+
+    def apply_optimal_settings(self):
+        """Прилага набор стойности, изпитани за бърза и стабилна работа.
+        Не пипа ключове, потребителско име и характера на AI-то."""
+        # --- Скорост на изхода ---
+        self.voice_engine_menu.set(VOICE_REGISTRY["piper"]["label"])  # офлайн = най-бърз
+        self.voice_effect_menu.set("Няма")        # ефектите добавят обработка
+        self.speed_slider.set(0.85)
+        self.expressiveness_slider.set(0.9)
+        self.volume_slider.set(1.3)
+        self.live_volume_slider.set(1.0)
+
+        # --- Филтри: режат преди синтез и преди заявка ---
+        self.spam_filter_var.set(True)
+        self.strip_mentions_var.set(True)
+        self.shlyokavitsa_var.set(True)
+        self.skip_instead_of_truncate_var.set(True)   # по-бързо от съкращаване
+        self.max_chars_entry.delete(0, "end"); self.max_chars_entry.insert(0, "180")
+        self.max_name_len_entry.delete(0, "end"); self.max_name_len_entry.insert(0, "20")
+
+        # --- AI: пести лимита, реагира бързо ---
+        self.gemini_model_entry.set(TEXT_MODELS[0])   # flash-lite = най-висок лимит
+        self.ai_frequency_menu.set("На всеки N-ти")
+        self.ai_every_n_entry.delete(0, "end"); self.ai_every_n_entry.insert(0, "12")
+        self.ai_min_chars_entry.delete(0, "end"); self.ai_min_chars_entry.insert(0, "8")
+
+        # --- Live AI ---
+        self.live_batch_seconds_entry.delete(0, "end")
+        self.live_batch_seconds_entry.insert(0, "8")
+        self.live_every_n_entry.delete(0, "end"); self.live_every_n_entry.insert(0, "6")
+        self.live_autoreconnect_var.set(True)
+        self.half_duplex_var.set(True)            # без ехо
+
+        # --- Обявявания ---
+        self.announce_follow_var.set(True)
+        self.announce_share_var.set(True)
+        self.announce_gift_var.set(True)
+        self.announce_viewers_var.set(False)      # най-често дразни
+
+        try:
+            self.live_volume_label.configure(text="1.00x")
+            self.humor_label.configure(text=f"{int(self.humor_slider.get())}%")
+        except Exception:
+            pass
+
+        self._log("[Настройки] ✓ Приложени оптимални стойности за бърза работа.")
+        self._log(
+            "   Локален глас (офлайн, най-бърз) • без ефекти • строги филтри • "
+            "flash-lite за AI • без обявяване на зрители"
+        )
+        self._log("   Ключовете, името и характерът на AI-то са запазени.")
+        self._log_voice_summary()
 
     def _reset_voice_settings(self):
         """Връща само гласовите настройки по подразбиране — ключовете и
@@ -3730,6 +3787,7 @@ class App(ctk.CTk):
                 continue      # заглушено — не синтезираме изобщо
             selected = self._get_selected_voice()
 
+            t_start = time.time()
             try:
                 if selected == "piper":
                     if self.voice is None:
@@ -3744,6 +3802,9 @@ class App(ctk.CTk):
                     effect = self._cfg("effect", "Няма")
                     if effect != "Няма":
                         apply_voice_effect(tmp_path, effect)
+
+                    if self._cfg("debug", False):
+                        self._log(f"  [DEBUG] синтез за {round((time.time()-t_start)*1000)} ms")
 
                     sound = pygame.mixer.Sound(tmp_path)
                     channel = sound.play()
@@ -3766,6 +3827,8 @@ class App(ctk.CTk):
                         await communicate.save(tmp_path)
 
                     asyncio.run(_synthesize())
+                    if self._cfg("debug", False):
+                        self._log(f"  [DEBUG] Edge TTS за {round((time.time()-t_start)*1000)} ms")
 
                     pygame.mixer.music.load(tmp_path)
                     pygame.mixer.music.play()
