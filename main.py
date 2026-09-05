@@ -642,6 +642,8 @@ class App(ctk.CTk):
         # Групиране на събития: буфер + ключалка, за да не правим заявка за всяко събитие
         self.live_event_buffer = []
         self.live_buffer_lock = threading.Lock()
+        self.live_buffer_started = 0.0
+        self.live_last_event_ts = 0.0
 
         self._build_ui()
         self._enable_clipboard_everywhere()
@@ -1208,18 +1210,18 @@ class App(ctk.CTk):
             variable=self.live_feed_viewers_var,
         ).pack(side="left")
 
-        row = self._row(tab, "Групирай на всеки:")
+        row = self._row(tab, "Макс. изчакване:")
         self.live_batch_seconds_entry = ctk.CTkEntry(row, width=70)
         self.live_batch_seconds_entry.insert(0, "8")
         self.live_batch_seconds_entry.pack(side="left")
         ctk.CTkLabel(row, text="секунди").pack(side="left", padx=(6, 0))
         self._hint(
             tab,
-            "Събитията се трупат и се пращат наведнъж. Ако 20 души те последват за "
-            "20 секунди, това е ЕДНА заявка вместо 20 — пести лимита и AI-то реагира "
-            "смислено, вместо да ги изрежда едно по едно.\n"
-            "Не слагай под 5 секунди: на AI-то му трябват 5-10 секунди да изговори "
-            "отговор, а при по-кратък интервал то постоянно изостава.",
+            "При единично събитие AI-то реагира за около секунда. Ако събитията "
+            "валят едно след друго, се трупат и излизат наведнъж — това пести "
+            "лимита и звучи смислено ('Иван, Петър и Гошо ви последваха').\n"
+            "Тази стойност е само ТАВАН: колко най-много да чака, ако напливът "
+            "не спира.",
         )
 
         self._section(tab, "Микрофон", "За да те слуша Live AI-то и да ти отговаря.")
@@ -2663,7 +2665,11 @@ class App(ctk.CTk):
         kind: 'follow' | 'share' | 'gift' | 'comment'"""
         if not self.live_running:
             return
+        now = time.time()
         with self.live_buffer_lock:
+            if not self.live_event_buffer:
+                self.live_buffer_started = now   # начало на текущата група
+            self.live_last_event_ts = now
             self.live_event_buffer.append((kind, detail))
             # Ако AI-то говори дълго при наплив, буферът не бива да расте
             # безкрайно — пазим последните 40 събития.
@@ -2671,40 +2677,47 @@ class App(ctk.CTk):
                 del self.live_event_buffer[:-40]
 
     def _live_batch_worker(self):
-        """Периодично събира натрупаните събития в едно съобщение и го праща."""
-        while True:
-            try:
-                interval = max(2, int(self._cfg("batch_seconds") or 8))
-            except (ValueError, TypeError):
-                interval = 8
+        """Праща натрупаните събития. Реагира БЪРЗО на единично събитие, а
+        групира само когато наистина валят едно след друго."""
+        COALESCE = 1.2      # изчакване след последното събитие, за да слеем близките
+        TICK = 0.25
 
-            time.sleep(interval)
+        while True:
+            time.sleep(TICK)
 
             if not self.live_running:
                 continue
 
-            # Докато AI-то говори, НЕ пращаме ново — оставяме събитията да се
-            # трупат в буфера. Иначе се редят една след друга и то постоянно
-            # изостава, говорейки за отдавна минали неща.
-            if self.live_model_speaking:
-                continue
-
-            # Ако вече има неизпратено съобщение, също изчакваме — няма смисъл
-            # да редим второ зад него.
-            if not self.live_text_queue.empty():
+            # Докато AI-то говори или има неизпратено — трупаме, не редим.
+            if self.live_model_speaking or not self.live_text_queue.empty():
                 continue
 
             with self.live_buffer_lock:
+                if not self.live_event_buffer:
+                    continue
+                n = len(self.live_event_buffer)
+                waited = time.time() - self.live_buffer_started
+                quiet = time.time() - self.live_last_event_ts
+
+                try:
+                    max_wait = max(1.0, float(self._cfg("batch_seconds") or 8))
+                except (ValueError, TypeError):
+                    max_wait = 8.0
+
+                # Пращаме, когато: настъпило е затишие (значи напливът свърши),
+                # или сме чакали максималното, или са се събрали много събития.
+                ready = quiet >= COALESCE or waited >= max_wait or n >= 12
+                if not ready:
+                    continue
+
                 events = self.live_event_buffer[:]
                 self.live_event_buffer.clear()
-
-            if not events:
-                continue
 
             message = self._compose_batch_message(events)
             if message:
                 self.live_text_queue.put(message)
-                self._log(f"[Live AI ->] ({len(events)} събития в 1 заявка)")
+                delay = round(time.time() - self.live_buffer_started, 1)
+                self._log(f"[Live AI ->] {len(events)} събития, изчакани {delay} сек.")
 
     def _compose_batch_message(self, events) -> str:
         """Съединява събитията в едно кратко, четимо резюме за AI-то."""
