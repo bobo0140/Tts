@@ -53,6 +53,8 @@ from TikTokLive.events import (
 )
 from TikTokLive.client.web.web_settings import WebDefaults
 
+APP_VERSION = "51"
+
 HEART_ME_GIFT_NAME = "heart me"  # сравнява се без главни/малки букви
 
 # Централен регистър на гласовете: key -> (кратко име за показване, engine, edge voice id или None)
@@ -1041,8 +1043,10 @@ class App(ctk.CTk):
             "Важи и за текстовия коментатор, и за Live AI.",
         )
 
-        row = self._row(tab, "Характер:")
-        self.personality_menu = ctk.CTkOptionMenu(row, values=list(PERSONALITIES.keys()))
+        row = self._row(tab, "Готов характер:")
+        self.personality_menu = ctk.CTkOptionMenu(
+            row, values=list(PERSONALITIES.keys()), command=self._on_personality_pick
+        )
         self.personality_menu.set("Балансиран")
         self.personality_menu.pack(side="left", fill="x", expand=True)
 
@@ -1056,11 +1060,18 @@ class App(ctk.CTk):
         self.humor_slider.set(50)
         self.humor_slider.pack(side="left", fill="x", expand=True, padx=10)
 
-        row = self._row(tab, "Свои инструкции:")
-        self.custom_prompt_entry = ctk.CTkEntry(
-            row, placeholder_text="напр. Играя Fortnite, споменавай това от време на време"
+        ctk.CTkLabel(
+            tab, text="Опиши характера със свои думи (това е най-важното поле):",
+            font=ctk.CTkFont(size=11), text_color=MUTED, anchor="w",
+        ).pack(fill="x", padx=8, pady=(8, 2))
+        self.custom_prompt_entry = ctk.CTkTextbox(tab, height=80, wrap="word")
+        self.custom_prompt_entry.pack(fill="x", padx=8, pady=(0, 6))
+        self._hint(
+            tab,
+            "Напр.: 'Ти си шегаджия, играя Fortnite, закачай ме за лошите игри, "
+            "говори кратко и на жаргон.' Каквото напишеш тук се добавя към "
+            "характера отгоре.",
         )
-        self.custom_prompt_entry.pack(side="left", fill="x", expand=True)
 
         self._section(
             tab, "AI коментатор (текст)",
@@ -1882,7 +1893,7 @@ class App(ctk.CTk):
     SETTINGS_ENTRIES = [
         "username_entry", "api_key_entry", "tikfinity_url_entry", "filter_entry",
         "max_chars_entry", "max_name_len_entry", "viewer_interval_entry",
-        "gemini_api_key_entry", "streamer_name_entry", "custom_prompt_entry",
+        "gemini_api_key_entry", "streamer_name_entry",
         "ai_every_n_entry", "live_every_n_entry",
         "live_batch_seconds_entry", "hotkey_entry", "mute_hotkey_entry",
         "test_name_entry",
@@ -1947,6 +1958,7 @@ class App(ctk.CTk):
                 data["shuffle"][key] = bool(var.get())
             except Exception:
                 pass
+        data["custom_prompt"] = self._custom_prompt()
         return data
 
     def _apply_settings(self, data: dict):
@@ -1987,6 +1999,13 @@ class App(ctk.CTk):
                     var.set(bool(value))
                 except Exception:
                     pass
+
+        try:
+            self.custom_prompt_entry.delete("1.0", "end")
+            if data.get("custom_prompt"):
+                self.custom_prompt_entry.insert("1.0", data["custom_prompt"])
+        except Exception:
+            pass
 
         # прилагаме режима на свързване и обновяваме етикетите на плъзгачите
         try:
@@ -2047,6 +2066,7 @@ class App(ctk.CTk):
     def _save_settings(self, silent: bool = False):
         try:
             data = self._snapshot_settings()
+            data["app_version"] = APP_VERSION
             self._settings_path().write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -2066,8 +2086,21 @@ class App(ctk.CTk):
             self._log(f"[Настройки] Не мога да прочета {path.name}: {e}")
             return
 
+        saved_ver = data.get("app_version", "неизвестна")
         self._apply_settings(data)
-        self._log("[Настройки] Заредени от предишния път.")
+
+        if saved_ver != APP_VERSION:
+            self._log(
+                f"[Настройки] Заредени от файл, писан от версия {saved_ver} "
+                f"(сегашната е {APP_VERSION})."
+            )
+            self._log(
+                "[Внимание] Ако новата версия се държи странно, натисни "
+                "'↺ Върни фабричните настройки' в таб 'Тест' — файлът settings.json "
+                "се ползва от всички версии в същата папка."
+            )
+        else:
+            self._log("[Настройки] Заредени от предишния път.")
 
         self._log_voice_summary()
 
@@ -2115,7 +2148,7 @@ class App(ctk.CTk):
                 "half_duplex": bool(self.half_duplex_var.get()),
                 "personality": self.personality_menu.get(),
                 "humor": int(self.humor_slider.get()),
-                "custom_prompt": self.custom_prompt_entry.get().strip(),
+                "custom_prompt": self._custom_prompt(),
             }
             self.half_duplex = self.cfg["half_duplex"]
             self.stats_label.configure(
@@ -2222,6 +2255,16 @@ class App(ctk.CTk):
         if self._tr_out.strip():
             self._log(f"[AI казва] {self._tr_out.strip()}")
         self._tr_out = ""
+
+    def _custom_prompt(self) -> str:
+        """Текстовото поле се чете различно от обикновените полета."""
+        try:
+            return self.custom_prompt_entry.get("1.0", "end").strip()
+        except Exception:
+            return ""
+
+    def _on_personality_pick(self, value):
+        self._log(f"[AI] Характер: {value}. Може да го доуточниш в полето отдолу.")
 
     def _reset_voice_settings(self):
         """Връща само гласовите настройки по подразбиране — ключовете и
@@ -2714,12 +2757,6 @@ class App(ctk.CTk):
         if not parts:
             return ""
 
-        # Общата статистика само от време на време (на всеки 8 съобщения),
-        # иначе AI-то я изрежда постоянно и става досадно.
-        self.batch_count = getattr(self, "batch_count", 0) + 1
-        if self.batch_count % 8 == 0 and self.stat_follows:
-            parts.append(f"(Между другото, вече {self.stat_follows} нови последователи.)")
-
         return (
             " ".join(parts)
             + " Реагирай съвсем кратко — едно изречение. Ако има нови последователи, "
@@ -3012,7 +3049,7 @@ class App(ctk.CTk):
                     + mood_line(
                         self.personality_menu.get(),
                         int(self.humor_slider.get()),
-                        self.custom_prompt_entry.get().strip(),
+                        self._custom_prompt(),
                     )
                     + streamer_line(streamer)
                 )}]
