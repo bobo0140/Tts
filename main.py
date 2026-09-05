@@ -623,6 +623,7 @@ class App(ctk.CTk):
         self.live_resume_handle = None   # талон за продължаване на същата Live сесия
         self.live_send_stream_end = False
         self.live_setup_level = 0        # кое ниво на setup работи за този ключ/модел
+        self.live_session_id = 0         # само най-новата сесия има право да работи
         # Координация на ходовете — кой говори в момента
         # Статистика за сесията
         self.stat_follows = 0
@@ -2673,14 +2674,19 @@ class App(ctk.CTk):
             return
 
         self.live_running = True
+        self.live_session_id += 1          # всяка нова сесия обезсилва старите
+        session_id = self.live_session_id
         self.live_start_btn.configure(state="disabled")
         self.live_stop_btn.configure(state="normal")
         self.live_status_label.configure(text="◌ Live AI свързване...", text_color="orange")
 
-        threading.Thread(target=self._run_live_client, args=(api_key,), daemon=True).start()
+        threading.Thread(
+            target=self._run_live_client, args=(api_key, session_id), daemon=True
+        ).start()
 
     def stop_live_ai(self):
         self.live_running = False
+        self.live_session_id += 1        # обезсилва всички текущи нишки
         self.live_resume_handle = None   # ръчно спиране = нова сесия следващия път
         self.live_setup_level = 0
         self._stop_mic()
@@ -3125,7 +3131,7 @@ class App(ctk.CTk):
 
         return setup
 
-    def _run_live_client(self, api_key: str):
+    def _run_live_client(self, api_key: str, session_id: int = 0):
         import base64
         import websockets
 
@@ -3139,7 +3145,7 @@ class App(ctk.CTk):
 
         async def sender(ws):
             """Праща микрофонно аудио и текстови събития към AI-то."""
-            while self.live_running:
+            while self.live_running and session_id == self.live_session_id:
                 sent_something = False
 
                 # микрофон
@@ -3199,7 +3205,7 @@ class App(ctk.CTk):
         async def receiver(ws, out_stream, out_rate=LIVE_OUTPUT_RATE):
             """Получава аудио от AI-то и го пуска през говорителите."""
             async for raw in ws:
-                if not self.live_running:
+                if not self.live_running or session_id != self.live_session_id:
                     break
                 msg = _parse_ws(raw)
                 if not msg:
@@ -3249,7 +3255,8 @@ class App(ctk.CTk):
                     if data_b64:
                         self.live_model_speaking = True
                         self.live_last_audio_ts = time.time()
-                    if data_b64 and out_stream is not None and not self.muted:
+                    if (data_b64 and out_stream is not None and not self.muted
+                            and session_id == self.live_session_id):
                         try:
                             pcm = base64.b64decode(data_b64)
                             gain = float(self._cfg("live_volume", 1.0))
@@ -3475,6 +3482,13 @@ class App(ctk.CTk):
                 self.live_fatal = False
                 return
 
+            # Ако междувременно е стартирана нова сесия (или е натиснат Стоп),
+            # тази нишка е остаряла — приключва тихо, без да се пресвързва.
+            # Иначе изостанали нишки оживяват и AI-то проговаря само.
+            if session_id != self.live_session_id:
+                self._log("[Live AI] Стара сесия приключи (заменена е с по-нова).")
+                return
+
             if self.live_running and self.live_autoreconnect_var.get():
                 if self.live_resume_handle:
                     self._log("[Live AI] Пресвързвам се и продължавам сесията...")
@@ -3482,9 +3496,9 @@ class App(ctk.CTk):
                     self._log("[Live AI] Връзката падна — пресвързвам се...")
                 self._set_status(self.live_status_label, "◌ Live AI пресвързване...", WARN_COLOR)
                 time.sleep(1.5)
-                if self.live_running:
+                if self.live_running and session_id == self.live_session_id:
                     threading.Thread(
-                        target=self._run_live_client, args=(api_key,), daemon=True
+                        target=self._run_live_client, args=(api_key, session_id), daemon=True
                     ).start()
                     return
 
