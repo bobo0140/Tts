@@ -2660,6 +2660,15 @@ class App(ctk.CTk):
         if not api_key:
             self._log("[Live AI] Липсва Gemini API ключ — попълни го в таб 'AI'.")
             return
+
+        bad = [c for c in api_key if not (32 < ord(c) < 127)]
+        if bad:
+            self._log(
+                f"[Live AI] СПРЯНО: ключът съдържа непозволени знаци {bad[:5]} "
+                "(кирилица, интервал или нов ред). Изтрий полето изцяло и постави "
+                "ключа наново — с десен бутон → Постави, или бутона 'Постави'."
+            )
+            return
         if self.live_running:
             return
 
@@ -3187,7 +3196,7 @@ class App(ctk.CTk):
 
                 await asyncio.sleep(0.01 if sent_something else 0.05)
 
-        async def receiver(ws, out_stream):
+        async def receiver(ws, out_stream, out_rate=LIVE_OUTPUT_RATE):
             """Получава аудио от AI-то и го пуска през говорителите."""
             async for raw in ws:
                 if not self.live_running:
@@ -3244,9 +3253,22 @@ class App(ctk.CTk):
                         try:
                             pcm = base64.b64decode(data_b64)
                             gain = float(self._cfg("live_volume", 1.0))
-                            if abs(gain - 1.0) > 0.01:
+                            need_resample = out_rate != LIVE_OUTPUT_RATE
+
+                            if abs(gain - 1.0) > 0.01 or need_resample:
                                 samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
-                                samples = np.clip(samples * gain, -32768, 32767)
+                                if abs(gain - 1.0) > 0.01:
+                                    samples = samples * gain
+                                if need_resample:
+                                    ratio = out_rate / LIVE_OUTPUT_RATE
+                                    n_out = int(len(samples) * ratio)
+                                    if n_out > 0:
+                                        samples = np.interp(
+                                            np.linspace(0, len(samples) - 1, n_out),
+                                            np.arange(len(samples)),
+                                            samples,
+                                        )
+                                samples = np.clip(samples, -32768, 32767)
                                 pcm = samples.astype(np.int16).tobytes()
                             out_stream.write(pcm)
                         except Exception:
@@ -3257,14 +3279,47 @@ class App(ctk.CTk):
 
         async def run(level):
             out_stream = None
+            out_rate = LIVE_OUTPUT_RATE
             try:
                 import sounddevice as sd
-                out_stream = sd.RawOutputStream(
-                    samplerate=LIVE_OUTPUT_RATE, dtype="int16", channels=1,
-                    device=self._get_selected_output_device(),
-                )
-                out_stream.start()
-                self._log("[Live AI] Аудио изходът е отворен.")
+                dev = self._get_selected_output_device()
+
+                # Не всяка карта поддържа 24000 Hz (грешка -9997). Пробваме
+                # първо родната честота, после честотата на устройството.
+                candidates = [LIVE_OUTPUT_RATE]
+                try:
+                    info = sd.query_devices(dev, "output")
+                    native = int(info["default_samplerate"])
+                    if native not in candidates:
+                        candidates.append(native)
+                except Exception:
+                    pass
+                candidates += [48000, 44100]
+
+                last_err = None
+                for rate in candidates:
+                    try:
+                        out_stream = sd.RawOutputStream(
+                            samplerate=rate, dtype="int16", channels=1,
+                            blocksize=1200, device=dev,
+                        )
+                        out_stream.start()
+                        out_rate = rate
+                        break
+                    except Exception as e:
+                        last_err = e
+                        out_stream = None
+
+                if out_stream is None:
+                    raise last_err or RuntimeError("няма подходяща честота")
+
+                if out_rate != LIVE_OUTPUT_RATE:
+                    self._log(
+                        f"[Live AI] Аудио изходът работи на {out_rate} Hz "
+                        f"(картата не приема {LIVE_OUTPUT_RATE} Hz) — преобразувам."
+                    )
+                else:
+                    self._log("[Live AI] Аудио изходът е отворен.")
             except Exception as e:
                 self._log(
                     f"[Live AI] НЯМА ИЗХОД ЗА ЗВУК ({e}) — ще виждаш само текста. "
@@ -3301,7 +3356,7 @@ class App(ctk.CTk):
                 self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
                 self._set_status(self.live_status_label, "● Live AI активен", OK_COLOR)
 
-                await asyncio.gather(sender(ws), receiver(ws, out_stream))
+                await asyncio.gather(sender(ws), receiver(ws, out_stream, out_rate))
 
                 # Точната причина за затваряне — това е ключът към диагнозата
                 try:
@@ -3348,6 +3403,13 @@ class App(ctk.CTk):
                         raise
                     last_error = e
                     reason = detail.split(";")[0][:120]
+
+                    # Лош ключ = окончателно. Няма смисъл да пробваме нива.
+                    if "API key not valid" in detail or "API_KEY_INVALID" in detail:
+                        self.live_fatal = True
+                        self._log("[Live AI] Google отхвърли ключа като невалиден.")
+                        break
+
                     self._log(f"[Live AI] Ниво '{SETUP_LEVELS[level]}' отказано: {reason}")
                     if level + 1 < len(SETUP_LEVELS):
                         self._log(f"[Live AI] Пробвам '{SETUP_LEVELS[level + 1]}'...")
@@ -3399,6 +3461,20 @@ class App(ctk.CTk):
                 pass
 
             # Автоматично пресвързване, ако връзката е паднала сама
+            # Невалиден ключ няма да се оправи от само себе си — спираме,
+            # вместо да се въртим безкрайно и да пълним лога.
+            if getattr(self, "live_fatal", False):
+                self.live_running = False
+                self._log(
+                    "[Live AI] СПРЯНО. Ключът е отхвърлен от Google. Провери го в "
+                    "таб 'AI' (изтрий полето и постави наново) и натисни 'Свържи' пак."
+                )
+                self._set_btn(self.live_start_btn, "normal")
+                self._set_btn(self.live_stop_btn, "disabled")
+                self._set_status(self.live_status_label, "○ Live AI спрян (лош ключ)", ERR_COLOR)
+                self.live_fatal = False
+                return
+
             if self.live_running and self.live_autoreconnect_var.get():
                 if self.live_resume_handle:
                     self._log("[Live AI] Пресвързвам се и продължавам сесията...")
