@@ -2907,8 +2907,9 @@ class App(ctk.CTk):
 
         speech_config = {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}
         # Езиковият код помага Gemini да не бърка българския с полски, но
-        # native-audio моделите не го поддържат — затова пада първи.
-        if level < 1:
+        # native-audio моделите изрично НЕ го поддържат и отхвърлят връзката.
+        native_audio = "native-audio" in model
+        if level < 1 and not native_audio:
             speech_config["languageCode"] = "bg-BG"
 
         setup = {
@@ -3158,6 +3159,22 @@ class App(ctk.CTk):
                             f"[Live AI] Ниво '{SETUP_LEVELS[level]}' не се приема — "
                             f"пробвам '{SETUP_LEVELS[level + 1]}'..."
                         )
+                    continue
+                except Exception as e:
+                    # Сървърът къса връзката с код 1007/1008, когато не приема
+                    # някое поле. Това също е отхвърлен setup — продължаваме
+                    # надолу по нивата, вместо да се предаваме.
+                    detail = str(e)
+                    looks_like_setup = any(
+                        s in detail for s in ("1007", "1008", "Unsupported", "Invalid", "invalid")
+                    )
+                    if not looks_like_setup:
+                        raise
+                    last_error = e
+                    reason = detail.split(";")[0][:120]
+                    self._log(f"[Live AI] Ниво '{SETUP_LEVELS[level]}' отказано: {reason}")
+                    if level + 1 < len(SETUP_LEVELS):
+                        self._log(f"[Live AI] Пробвам '{SETUP_LEVELS[level + 1]}'...")
                     continue
             if last_error is not None:
                 self._log(
