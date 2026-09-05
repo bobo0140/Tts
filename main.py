@@ -967,6 +967,12 @@ class App(ctk.CTk):
         self.voice_effect_menu.pack(side="left", fill="x", expand=True)
         self._hint(tab, "Ефектите работят само за Dimitar — другите два гласа идват готови от облака.")
 
+        row = self._row(tab)
+        ctk.CTkButton(
+            row, text="↺ Върни гласовите настройки", command=self._reset_voice_settings,
+            width=230, height=32, fg_color="gray30", hover_color="gray25",
+        ).pack(side="left")
+
         ctk.CTkButton(
             tab, text="🔊  Пробвай гласа", command=self._preview_voice, width=180, height=36,
             corner_radius=8, fg_color=ACCENT, hover_color=ACCENT_HOVER,
@@ -2059,15 +2065,7 @@ class App(ctk.CTk):
         self._apply_settings(data)
         self._log("[Настройки] Заредени от предишния път.")
 
-        try:
-            v = float(self.volume_slider.get())
-            if v < 0.3:
-                self._log(f"[Внимание] Силата на TTS гласа е много ниска ({v:.2f}x) — таб 'Глас'.")
-            lv = float(self.live_volume_slider.get())
-            if lv < 0.3:
-                self._log(f"[Внимание] Силата на Live AI е много ниска ({lv:.2f}x) — таб 'AI'.")
-        except Exception:
-            pass
+        self._log_voice_summary()
 
     def _autosave_settings(self):
         if getattr(self, "_closing", False):
@@ -2211,6 +2209,66 @@ class App(ctk.CTk):
         if len(text) > limit:
             text = text[:limit] + f"… (+{len(text) - limit} знака)"
         self._log(f"  [DEBUG {direction}] {text}")
+
+    def _reset_voice_settings(self):
+        """Връща само гласовите настройки по подразбиране — ключовете и
+        останалото остават непокътнати."""
+        self.speed_slider.set(0.85)
+        self.expressiveness_slider.set(0.9)
+        self.volume_slider.set(1.3)
+        self.live_volume_slider.set(1.0)
+        self.voice_effect_menu.set("Няма")
+        try:
+            self.live_volume_label.configure(text="1.00x")
+        except Exception:
+            pass
+        self._log("[Глас] Върнати по подразбиране: скорост 0.85, сила 1.30x, без ефект.")
+        self._log_voice_summary()
+
+    def _log_voice_summary(self):
+        """Показва текущите гласови настройки — за да не се чудиш защо звучи
+        различно, ако нещо е останало от предишен път."""
+        try:
+            speed = float(self.speed_slider.get())
+            vol = float(self.volume_slider.get())
+            live_vol = float(self.live_volume_slider.get())
+            effect = self.voice_effect_menu.get()
+            shuffle = self.voice_shuffle_var.get()
+            voice = self.voice_engine_menu.get().split(" (")[0]
+            mode = self.output_mode.get()
+        except Exception:
+            return
+
+        if shuffle:
+            pool = [VOICE_REGISTRY[k]["short"] for k, v in self.shuffle_vars.items() if v.get()]
+            voice_txt = f"разбъркване между {', '.join(pool) if pool else '(нищо избрано!)'}"
+        else:
+            voice_txt = f"{voice} (разбъркването е изключено)"
+
+        self._log(
+            f"[Глас] {voice_txt} | скорост {speed:.2f} | сила {vol:.2f}x | "
+            f"ефект: {effect} | режим: {mode} | Live AI сила {live_vol:.2f}x"
+        )
+
+        if speed > 1.05:
+            self._log(
+                f"[Внимание] Скоростта е {speed:.2f} — това звучи БАВНО. "
+                "По-ниска стойност = по-бърз говор (0.85 е нормалното)."
+            )
+        if effect != "Няма":
+            self._log(
+                f"[Внимание] Включен е ефект '{effect}'. "
+                "'Дълбок глас' нарочно забавя и снижава гласа."
+            )
+        if vol < 0.3:
+            self._log(f"[Внимание] Силата на TTS гласа е много ниска ({vol:.2f}x).")
+        if live_vol < 0.3:
+            self._log(f"[Внимание] Силата на Live AI е много ниска ({live_vol:.2f}x).")
+        if not shuffle:
+            self._log(
+                "[Съвет] Чуваш само един глас, защото разбъркването е изключено. "
+                "Включи 'Разбъркай гласовете' в таб 'Глас' за редуване."
+            )
 
     def _reset_stats(self):
         self.stat_follows = self.stat_shares = self.stat_gifts = 0
