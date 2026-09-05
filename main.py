@@ -53,7 +53,15 @@ from TikTokLive.events import (
 )
 from TikTokLive.client.web.web_settings import WebDefaults
 
-APP_VERSION = "51"
+APP_VERSION = "52"
+
+# Кои табове се виждат при всеки профил. Скритите пак съществуват вътрешно,
+# за да не се губят настройките им — просто не се показват.
+PROFILES = {
+    "Само TTS":     ["home", "filters", "voice", "test"],
+    "Само Live AI": ["home", "filters", "ai", "test"],
+    "Пълно":        ["home", "filters", "voice", "ai", "test"],
+}
 
 HEART_ME_GIFT_NAME = "heart me"  # сравнява се без главни/малки букви
 
@@ -648,6 +656,7 @@ class App(ctk.CTk):
         self.live_buffer_started = 0.0
         self.live_last_event_ts = 0.0
 
+        self.profile = self._read_saved_profile()
         self._build_ui()
         self._enable_clipboard_everywhere()
         self._defaults = self._snapshot_settings()   # фабричните стойности
@@ -774,6 +783,20 @@ class App(ctk.CTk):
         self.mute_btn.pack(side="right", padx=(0, 8))
 
         # ---------------- Режим на изхода ----------------
+        prof_bar = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=10)
+        prof_bar.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(
+            prof_bar, text="Режим на работа", font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(side="left", padx=(18, 14), pady=10)
+        self.profile_menu = ctk.CTkSegmentedButton(
+            prof_bar, values=list(PROFILES.keys()), height=32,
+            font=ctk.CTkFont(size=12),
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            command=self._on_profile_changed,
+        )
+        self.profile_menu.set(getattr(self, "profile", "Пълно"))
+        self.profile_menu.pack(side="left", fill="x", expand=True, padx=(0, 18), pady=10)
+
         mode_bar = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=10)
         mode_bar.pack(fill="x", padx=14, pady=(0, 10))
         ctk.CTkLabel(
@@ -790,6 +813,13 @@ class App(ctk.CTk):
         self.output_mode.pack(side="left", fill="x", expand=True, padx=(0, 18), pady=10)
 
         # ---------------- Табове ----------------
+        self._build_tabs()
+
+    def _build_tabs(self):
+        """Създава табовете според профила. Съдържанието на скритите се
+        създава в невидим контейнер, за да работят настройките им нормално."""
+        visible = PROFILES.get(getattr(self, "profile", "Пълно"), PROFILES["Пълно"])
+
         self.tabview = ctk.CTkTabview(
             self, anchor="w", corner_radius=12,
             segmented_button_selected_color=ACCENT,
@@ -797,19 +827,20 @@ class App(ctk.CTk):
         )
         self.tabview.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
-        t_home = ctk.CTkScrollableFrame(self.tabview.add("  Начало  "), fg_color="transparent")
-        t_filters = ctk.CTkScrollableFrame(self.tabview.add("  Филтри  "), fg_color="transparent")
-        t_voice = ctk.CTkScrollableFrame(self.tabview.add("  Глас  "), fg_color="transparent")
-        t_ai = ctk.CTkScrollableFrame(self.tabview.add("  AI  "), fg_color="transparent")
-        t_test = ctk.CTkScrollableFrame(self.tabview.add("  Тест  "), fg_color="transparent")
-        for f in (t_home, t_filters, t_voice, t_ai, t_test):
-            f.pack(fill="both", expand=True)
+        self._stash = ctk.CTkFrame(self)   # нарочно не се показва
 
-        self._build_home_tab(t_home)
-        self._build_filters_tab(t_filters)
-        self._build_voice_tab(t_voice)
-        self._build_ai_tab(t_ai)
-        self._build_test_tab(t_test)
+        def container(key, label):
+            if key in visible:
+                f = ctk.CTkScrollableFrame(self.tabview.add(label), fg_color="transparent")
+                f.pack(fill="both", expand=True)
+                return f
+            return ctk.CTkFrame(self._stash)
+
+        self._build_home_tab(container("home", "  Начало  "))
+        self._build_filters_tab(container("filters", "  Филтри  "))
+        self._build_voice_tab(container("voice", "  Глас  "))
+        self._build_ai_tab(container("ai", "  AI  "))
+        self._build_test_tab(container("test", "  Тест  "))
 
     # ------------------------------------------------------------------
     def _build_home_tab(self, tab):
@@ -1939,9 +1970,19 @@ class App(ctk.CTk):
     def _settings_path(self) -> Path:
         return BASE_DIR / "settings.json"
 
+    def _read_saved_profile(self) -> str:
+        """Профилът трябва да се знае ПРЕДИ да строим табовете."""
+        try:
+            data = json.loads(self._settings_path().read_text(encoding="utf-8"))
+            p = data.get("profile", "Пълно")
+            return p if p in PROFILES else "Пълно"
+        except Exception:
+            return "Пълно"
+
     def _snapshot_settings(self) -> dict:
         """Прочита текущото състояние на всички контроли."""
-        data = {"entries": {}, "bools": {}, "menus": {}, "sliders": {}, "shuffle": {}}
+        data = {"entries": {}, "bools": {}, "menus": {}, "sliders": {}, "shuffle": {},
+                "profile": getattr(self, "profile", "Пълно")}
         for name in self.SETTINGS_ENTRIES:
             w = getattr(self, name, None)
             if w is not None:
@@ -2468,6 +2509,33 @@ class App(ctk.CTk):
         if last_space > max_chars * 0.6:
             cut = cut[:last_space]
         return cut.strip()
+
+    def _on_profile_changed(self, value: str):
+        if value == getattr(self, "profile", None):
+            return
+
+        saved = self._snapshot_settings()      # пазим всичко, преди да разрушим
+        self.profile = value
+
+        try:
+            self.tabview.destroy()
+            self._stash.destroy()
+        except Exception:
+            pass
+
+        self._build_tabs()
+        self._apply_settings(saved)
+        self._enable_clipboard_everywhere()
+
+        # Режимът на изхода следва профила, за да няма изненади
+        if value == "Само TTS":
+            self.output_mode.set("TTS гласове")
+        elif value == "Само Live AI":
+            self.output_mode.set("Само Live AI")
+
+        hidden = [k for k in ("voice", "ai") if k not in PROFILES[value]]
+        note = " (скрити табове: " + ", ".join(hidden) + ")" if hidden else ""
+        self._log(f"[Профил] {value}{note}. Настройките са запазени.")
 
     def _on_output_mode_changed(self, value: str):
         if value == "Само Live AI":
