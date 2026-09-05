@@ -28,6 +28,9 @@ jobs:
       - name: Build EXE with PyInstaller
         run: |
           pyinstaller --noconfirm --onefile --windowed --name TikTokTTS `
+            --add-data "ui.html;." `
+            --add-data "ui.js;." `
+            --collect-all webview `
             --collect-all customtkinter `
             --collect-data piper `
             --collect-submodules piper `
@@ -36,7 +39,7 @@ jobs:
             --collect-all TikTokLive `
             --collect-all sounddevice `
             --collect-all keyboard `
-            main.py
+            web_main.py
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
