@@ -611,6 +611,7 @@ class App(ctk.CTk):
         # AI коментатор (Gemini) - опашка + брояч за throttling "на всеки N-ти"
         self.ai_request_queue: "queue.Queue" = queue.Queue()
         self.ai_comment_counter = 0
+        self.ai_backoff_until = 0.0
 
         # Live AI (Gemini Live API)
         self.live_running = False
@@ -1106,9 +1107,21 @@ class App(ctk.CTk):
         self.ai_every_n_entry = ctk.CTkEntry(row, width=70)
         self.ai_every_n_entry.insert(0, "10")
         self.ai_every_n_entry.pack(side="left")
+
+        row = self._row(tab, "Мин. дължина на коментар:")
+        self.ai_min_chars_entry = ctk.CTkEntry(row, width=70)
+        self.ai_min_chars_entry.insert(0, "6")
+        self.ai_min_chars_entry.pack(side="left")
+        ctk.CTkLabel(row, text="знака").pack(side="left", padx=(6, 0))
+
         self._hint(
             tab,
-            "Безплатният лимит е ~10-15 заявки в минута. 'На всеки N-ти' те пази в тези граници.",
+            "По-къси коментари ('фа', 'ок', емоджи) не се пращат на AI-то — само "
+            "хабят лимит без полза.\n"
+            "Безплатните лимити: gemini-3.5-flash-lite издържа НАЙ-МНОГО заявки, "
+            "gemini-3.5-flash значително по-малко. Ако удряш в лимита, първо смени "
+            "модела на flash-lite, после увеличи N.\n"
+            "При удар в лимита приложението спира заявките за 60 секунди само.",
         )
 
         self._section(
@@ -1896,7 +1909,7 @@ class App(ctk.CTk):
         "username_entry", "api_key_entry", "tikfinity_url_entry", "filter_entry",
         "max_chars_entry", "max_name_len_entry", "viewer_interval_entry",
         "gemini_api_key_entry", "streamer_name_entry",
-        "ai_every_n_entry", "live_every_n_entry",
+        "ai_every_n_entry", "ai_min_chars_entry", "live_every_n_entry",
         "live_batch_seconds_entry", "hotkey_entry", "mute_hotkey_entry",
         "test_name_entry",
         "test_comment_entry",
@@ -2587,6 +2600,19 @@ class App(ctk.CTk):
     # ------------------------------------------------------------------
     def _maybe_trigger_ai_commentary(self, nickname: str, comment: str):
         if not self.ai_enabled_var.get():
+            return
+
+        # Отдръпване след удар в лимита — иначе всяка следваща заявка
+        # също се отказва и само трупаме грешки.
+        if time.time() < getattr(self, "ai_backoff_until", 0):
+            return
+
+        # Няма смисъл да хабим заявка за "фа", "ок", "😀" и подобни.
+        try:
+            min_len = max(0, int(self.ai_min_chars_entry.get().strip() or 6))
+        except (ValueError, AttributeError):
+            min_len = 6
+        if len(comment.strip()) < min_len:
             return
 
         self.ai_comment_counter += 1
@@ -3404,7 +3430,16 @@ class App(ctk.CTk):
                     if self._cfg("ai_speak", True):
                         self._enqueue_latest_only(reply, source="ai")
             except GeminiError as e:
-                self._log(f"[AI грешка] {e}")
+                msg = str(e)
+                if "лимит" in msg or "429" in msg:
+                    self.ai_backoff_until = time.time() + 60
+                    self._log(
+                        "[AI] Достигнат лимит — спирам заявките за 60 секунди. "
+                        "Ако се повтаря: смени модела на 'gemini-3.5-flash-lite' "
+                        "(по-висок безплатен лимит) или увеличи 'N' за коментарите."
+                    )
+                else:
+                    self._log(f"[AI грешка] {msg}")
 
     def _on_follow_event(self, nickname: str):
         self.stat_follows += 1
