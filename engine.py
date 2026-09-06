@@ -2732,48 +2732,70 @@ class Engine:
 
 
     def _init_fallback_audio(self, rate: int):
-        """Подготвя pygame за суров звук с ТОЧНАТА честота на потока.
-        Така не се налага преобразуване и няма пукане по ръбовете."""
+        """Подготвя pygame за суров звук. Ако друга част вече е стартирала
+        миксера с друга честота, НЕ се борим с нея — просто я разчитаме и
+        се съобразяваме в _play_pcm_fallback."""
         try:
-            if pygame.mixer.get_init():
-                pygame.mixer.quit()
-            pygame.mixer.init(frequency=rate, size=-16, channels=1, buffer=2048)
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=rate, size=-16, channels=1, buffer=2048)
             self._fb_channel = pygame.mixer.Channel(5)   # отделен канал за Live AI
-            self._fb_rate = rate
+            info = pygame.mixer.get_init()
+            self._log(f"[Live AI] Резервен изход: миксерът работи на {info[0]} Hz, "
+                      f"{abs(info[1])} бита, {info[2]} канал(а).")
             return True
         except Exception as e:
             self._log(f"[Live AI] Резервният изход не се подготви: {e}")
             return False
 
-    def _play_pcm_fallback(self, pcm: bytes, rate: int):
-        """Пуска суров PCM без прекъсвания.
+    def _fit_to_mixer(self, pcm: bytes, src_rate: int) -> bytes:
+        """Преобразува суровия звук към ТОЧНО това, което миксерът ползва.
 
-        Ключовото: НЕ пишем файлове и НЕ пускаме парчетата поотделно.
-        Правим звук директно от паметта и го нареждаме в опашката на канала,
-        така че следващото парче тръгва точно когато свърши предишното.
+        Без това звукът звучи забързан и писклив (24 kHz данни, пуснати на
+        44.1 kHz, вървят 1.8 пъти по-бързо).
         """
-        if getattr(self, "_fb_rate", None) != rate:
+        info = pygame.mixer.get_init()
+        if not info:
+            return pcm
+        mix_rate, _size, mix_ch = info
+
+        samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+
+        if mix_rate != src_rate and len(samples) > 1:
+            n_out = int(len(samples) * mix_rate / src_rate)
+            samples = np.interp(
+                np.linspace(0, len(samples) - 1, n_out),
+                np.arange(len(samples)),
+                samples,
+            )
+
+        samples = np.clip(samples, -32768, 32767).astype(np.int16)
+
+        if mix_ch == 2:                       # моно -> стерео
+            samples = np.repeat(samples, 2)
+
+        return samples.tobytes()
+
+    def _play_pcm_fallback(self, pcm: bytes, rate: int):
+        """Пуска суров PCM без прекъсвания и с правилната скорост."""
+        if not getattr(self, "_fb_channel", None):
             if not self._init_fallback_audio(rate):
                 return
 
         buf = self._fb_buf + pcm
-        # По-големи порции = по-малко шевове. 0.6 сек е добър баланс.
-        need = int(rate * 2 * 0.6)
+        need = int(rate * 2 * 0.6)          # ~0.6 сек от изходния поток
         if len(buf) < need:
             self._fb_buf = buf
             return
         self._fb_buf = b""
 
         try:
-            snd = pygame.mixer.Sound(buffer=buf)
+            snd = pygame.mixer.Sound(buffer=self._fit_to_mixer(buf, rate))
             ch = self._fb_channel
 
             if not ch.get_busy():
                 ch.play(snd)
                 return
 
-            # Каналът свири — чакаме място в опашката и нареждаме отзад.
-            # Така преходът е без пауза.
             for _ in range(300):
                 if self.muted or not self.live_running:
                     return
@@ -2791,7 +2813,7 @@ class Engine:
         if not rest or not getattr(self, "audio_fallback", False):
             return
         try:
-            snd = pygame.mixer.Sound(buffer=rest)
+            snd = pygame.mixer.Sound(buffer=self._fit_to_mixer(rest, LIVE_OUTPUT_RATE))
             ch = self._fb_channel
             if ch.get_busy():
                 for _ in range(200):
