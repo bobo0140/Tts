@@ -200,6 +200,13 @@ class Api:
         self.engine._refresh_cfg()
         self.engine._log(f"[Профил] {value}")
 
+    def js_error(self, msg):
+        """Грешките от интерфейса влизат в лога, вместо да изчезват."""
+        self.engine._log(f"[Интерфейс] Грешка: {msg}")
+
+    def ping(self):
+        return "ok"
+
     def open_key_page(self):
         webbrowser.open("https://aistudio.google.com/apikey")
 
@@ -255,13 +262,19 @@ class Api:
 
 
 def _delegate(name):
+    """Част от методите в ядрото са с долна черта, част не са.
+    Пробваме и двете имена, вместо да гадаем."""
     def call(self, *a):
-        fn = getattr(self.engine, name, None)
-        if fn:
-            try:
-                return fn(*a)
-            except Exception as ex:
-                self.engine._log(f"[Грешка] {name}: {ex}")
+        fn = getattr(self.engine, name, None) or getattr(self.engine, "_" + name, None)
+        if fn is None:
+            self.engine._log(f"[Грешка] Няма такъв метод: {name}")
+            return
+        try:
+            return fn(*a)
+        except Exception as ex:
+            import traceback as _tb
+            self.engine._log(f"[Грешка] {name}: {ex}")
+            _tb.print_exc()
     return call
 
 
@@ -276,7 +289,7 @@ for _m in [
     "test_burst_comments", "test_gemini_connection", "test_ai_commentator",
     "test_microphone", "test_audio_output", "test_api_full", "test_live_feed",
 ]:
-    setattr(Api, _m, _delegate("_" + _m if not _m.startswith("_") else _m))
+    setattr(Api, _m, _delegate(_m))
 
 
 def main():

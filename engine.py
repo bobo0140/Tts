@@ -981,8 +981,7 @@ class Engine:
             except Exception:
                 pass
 
-        self.start_btn.configure(state="normal")
-        self.stop_btn.configure(state="disabled")
+        self._set_btn()
         self._set_status("main", "○ Спряно", "muted")
 
     # ------------------------------------------------------------------
@@ -1227,8 +1226,7 @@ class Engine:
                 )
             except Exception:
                 pass
-        self.live_start_btn.configure(state="normal")
-        self.live_stop_btn.configure(state="disabled")
+        self._set_btn()
         self._set_status("live", "○ Live AI изключен", "muted")
 
     def _build_setup(self, model: str, voice: str, level: int) -> dict:

@@ -326,14 +326,35 @@ async function poll() {
   } catch (e) { /* прозорецът се затваря */ }
 }
 
-window.addEventListener("pywebviewready", async () => {
+async function boot() {
+  if (ready) return;
   api = window.pywebview.api;
-  S = await api.get_settings();
-  logCache = await api.get_log();
+  try {
+    S = await api.get_settings();
+    logCache = await api.get_log();
+  } catch (e) {
+    document.getElementById("main").innerHTML =
+      `<div class="card"><h2>Няма връзка с ядрото</h2>
+       <p class="sub">${esc(String(e))}</p></div>`;
+    return;
+  }
   ready = true;
   renderSegs(); renderNav(); renderPage();
   setInterval(poll, 500);
-  if (await api.needs_setup()) wizShow();
+  try { if (await api.needs_setup()) wizShow(); } catch (e) {}
+}
+
+// Събитието може да е минало, преди скриптът да се зареди — затова и двете.
+window.addEventListener("pywebviewready", boot);
+(function wait(n) {
+  if (window.pywebview && window.pywebview.api) return boot();
+  if (n > 100) return;
+  setTimeout(() => wait(n + 1), 80);
+})(0);
+
+// Всяка грешка в интерфейса да се вижда, вместо бутонът да мълчи
+window.addEventListener("error", e => {
+  if (ready && api.js_error) api.js_error(String(e.message) + " @" + e.lineno);
 });
 
 /* ======================= Съветник при стартиране ======================= */
