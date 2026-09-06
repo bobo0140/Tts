@@ -1412,6 +1412,7 @@ class Engine:
                     self._flush_transcripts()
                     self._log("[Live AI] Прекъснат (заговорил си докато AI-то говори).")
                 if server_content.get("turnComplete"):
+                    self._flush_fallback()
                     self.live_model_speaking = False
                     self.live.note_turn()
                     self.live.set_state(LM.READY, "чака")
@@ -1494,7 +1495,9 @@ class Engine:
                     try:
                         out_stream = sd.RawOutputStream(
                             samplerate=rate, dtype="int16", channels=1,
-                            blocksize=1200, device=dev,
+                            # По-голям блок = по-устойчиво срещу накъсване.
+                            # 4800 семпъла ≈ 200 ms при 24 kHz.
+                            blocksize=4800, device=dev,
                         )
                         out_stream.start()
                         out_rate = rate
@@ -1533,6 +1536,7 @@ class Engine:
                     if pygame.mixer.get_init() is None:
                         pygame.mixer.init()
                     self.audio_fallback = True
+                    self._init_fallback_audio(LIVE_OUTPUT_RATE)
                     self.audio_out_open = True
                     self.audio_out_info = "резервен изход (pygame)"
                     self._log("[Live AI] Ползвам резервен изход през pygame — звукът ще се чува.")
@@ -2727,32 +2731,75 @@ class Engine:
             self._log(f"[Звук] Не мога да прочета изходните устройства: {e}")
 
 
+    def _init_fallback_audio(self, rate: int):
+        """Подготвя pygame за суров звук с ТОЧНАТА честота на потока.
+        Така не се налага преобразуване и няма пукане по ръбовете."""
+        try:
+            if pygame.mixer.get_init():
+                pygame.mixer.quit()
+            pygame.mixer.init(frequency=rate, size=-16, channels=1, buffer=2048)
+            self._fb_channel = pygame.mixer.Channel(5)   # отделен канал за Live AI
+            self._fb_rate = rate
+            return True
+        except Exception as e:
+            self._log(f"[Live AI] Резервният изход не се подготви: {e}")
+            return False
+
     def _play_pcm_fallback(self, pcm: bytes, rate: int):
-        """Пуска суров PCM през pygame — резервен път, ако sounddevice липсва.
-        Трупа малки парчета, за да не се накъсва."""
-        buf = getattr(self, "_fb_buf", b"") + pcm
-        # ~0.35 сек на порция: достатъчно голямо, за да звучи слято
-        need = int(rate * 2 * 0.35)
+        """Пуска суров PCM без прекъсвания.
+
+        Ключовото: НЕ пишем файлове и НЕ пускаме парчетата поотделно.
+        Правим звук директно от паметта и го нареждаме в опашката на канала,
+        така че следващото парче тръгва точно когато свърши предишното.
+        """
+        if getattr(self, "_fb_rate", None) != rate:
+            if not self._init_fallback_audio(rate):
+                return
+
+        buf = self._fb_buf + pcm
+        # По-големи порции = по-малко шевове. 0.6 сек е добър баланс.
+        need = int(rate * 2 * 0.6)
         if len(buf) < need:
             self._fb_buf = buf
             return
         self._fb_buf = b""
 
         try:
-            fd, path = tempfile.mkstemp(suffix=".wav")
-            os.close(fd)
-            with wave.open(path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(rate)
-                wf.writeframes(buf)
-            snd = pygame.mixer.Sound(path)
-            ch = snd.play()
-            while ch and ch.get_busy():
-                if self.muted:
-                    ch.stop()
-                    break
+            snd = pygame.mixer.Sound(buffer=buf)
+            ch = self._fb_channel
+
+            if not ch.get_busy():
+                ch.play(snd)
+                return
+
+            # Каналът свири — чакаме място в опашката и нареждаме отзад.
+            # Така преходът е без пауза.
+            for _ in range(300):
+                if self.muted or not self.live_running:
+                    return
+                if ch.get_queue() is None:
+                    ch.queue(snd)
+                    return
                 time.sleep(0.02)
-            os.remove(path)
         except Exception as e:
             self._log(f"[Live AI] Резервният изход даде грешка: {e}")
+
+    def _flush_fallback(self):
+        """Изпраща остатъка в буфера, за да не се губи краят на изречението."""
+        rest = self._fb_buf
+        self._fb_buf = b""
+        if not rest or not getattr(self, "audio_fallback", False):
+            return
+        try:
+            snd = pygame.mixer.Sound(buffer=rest)
+            ch = self._fb_channel
+            if ch.get_busy():
+                for _ in range(200):
+                    if ch.get_queue() is None:
+                        ch.queue(snd)
+                        return
+                    time.sleep(0.02)
+            else:
+                ch.play(snd)
+        except Exception:
+            pass
