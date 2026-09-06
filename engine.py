@@ -28,6 +28,7 @@ from piper import PiperVoice
 from piper.config import SynthesisConfig
 from piper.download_voices import download_voice
 
+from api_module import ApiMetrics, classify
 from core_lib import (
     APP_VERSION, BASE_DIR, CONFIG_PATH, MODEL_PATH, VOICE_NAME, VOICES_DIR, HEART_ME_GIFT_NAME, LIVE_INPUT_RATE, LIVE_OUTPUT_RATE,
     LIVE_MODELS, LIVE_SYSTEM_PROMPT, LIVE_WS_URL, PERSONALITIES, PROFILES,
@@ -239,6 +240,8 @@ class Engine:
         self.mic_active = False
         self.mic_chunks_sent = 0
         self.hotkey_active = False
+
+        self.api = ApiMetrics()      # броячи за заявките към Gemini
 
         self.wizard_steps = []
         self.wizard_done = False
@@ -791,6 +794,7 @@ class Engine:
             model = self._cfg("gemini_model", TEXT_MODELS[0])
             try:
                 self._dbg("→", {"model": model, "user": nickname, "comment": comment})
+                _t0 = time.time()
                 reply = call_gemini(
                     api_key, model, nickname, comment,
                     streamer_name=self._cfg("streamer_name", ""),
@@ -801,14 +805,17 @@ class Engine:
                     ),
                 )
                 self._dbg("←", reply)
+                self.api.record(model, True, round((time.time() - _t0) * 1000))
                 if reply:
                     self._log(f"[AI] {reply}")
                     if self._cfg("ai_speak", True):
                         self._enqueue_latest_only(reply, source="ai")
             except GeminiError as e:
                 msg = str(e)
+                self.api.record(model, False, reason=classify(msg))
                 if "лимит" in msg or "429" in msg:
                     self.ai_backoff_until = time.time() + 60
+                    self.api.set_backoff(60)
                     self._log(
                         "[AI] Достигнат лимит — спирам заявките за 60 секунди. "
                         "Ако се повтаря: смени модела на 'gemini-3.5-flash-lite' "
@@ -1508,6 +1515,7 @@ class Engine:
                     self._log("[Live AI] Setup потвърден от сървъра.")
 
                 self.live_setup_level = level   # запомняме кое ниво работи
+                self.api.record(f"live:{model}", True)
                 self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
                 self._set_status("live", "● Live AI активен", "ok")
 
@@ -1560,6 +1568,7 @@ class Engine:
                     reason = detail.split(";")[0][:120]
 
                     # Лош ключ = окончателно. Няма смисъл да пробваме нива.
+                    self.api.record(f"live:{model}", False, reason=classify(detail))
                     if "API key not valid" in detail or "API_KEY_INVALID" in detail:
                         self.live_fatal = True
                         self._log("[Live AI] Google отхвърли ключа като невалиден.")
@@ -2394,6 +2403,8 @@ class Engine:
     # Проверка при стартиране (съветник)
     # ==================================================================
     def wizard_reset(self):
+        self.api = ApiMetrics()      # броячи за заявките към Gemini
+
         self.wizard_steps = []
         self.wizard_done = False
         self.wizard_ok = False
@@ -2469,9 +2480,12 @@ class Engine:
                     with urllib.request.urlopen(url, timeout=20) as r:
                         data = json.loads(r.read().decode("utf-8"))
                     models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+                    self.api.set_models(models)
+                    self.api.record("models.list", True, round((time.time() - t0) * 1000))
                     self._w("Връзка с Google", "ok",
                             f"{len(models)} модела, {round((time.time()-t0)*1000)} ms")
                 except urllib.error.HTTPError as e:
+                    self.api.record("models.list", False, reason="auth" if e.code in (401, 403) else "other")
                     self._w("Връзка с Google", "err", f"HTTP {e.code} — ключът е отхвърлен")
                     fatal = True
                 except Exception as e:

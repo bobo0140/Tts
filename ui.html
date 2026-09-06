@@ -153,6 +153,19 @@
   .hint{font-size:12px;color:var(--muted);line-height:1.6;margin-top:9px;
     padding-left:11px;border-left:2px solid var(--line)}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+  /* ---------- Табло ---------- */
+  .dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px}
+  .dash .card{margin:0}
+  .mod h2::before{display:none}
+  .mod h2{font-size:15px;gap:7px}
+  .kv{display:flex;flex-direction:column;gap:1px;margin-top:4px}
+  .kv > div{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+    padding:7px 0;border-bottom:1px solid #1C1C27;font-size:13px}
+  .kv > div:last-child{border:none}
+  .kv span{color:var(--muted)}
+  .kv b{font-weight:650;font-variant-numeric:tabular-nums;text-align:right}
+  .kv .g{color:var(--ok)} .kv .r{color:var(--err)}
   .grid button{padding:11px 14px;text-align:left;font-size:13px;font-weight:550}
 
   /* ---------- Log ---------- */

@@ -159,6 +159,60 @@ class Api:
             "log_len": len(e.log_lines),
         }
 
+    def get_metrics(self) -> dict:
+        """Данните за таблото. Всичко тук е измерено, не предположено."""
+        e = self.engine
+        api = e.api.snapshot()
+
+        # TikTok
+        tt_state = "ok" if e.is_running else "idle"
+        tt_note = "свързан" if e.is_running else "не е стартиран"
+
+        # Глас
+        qsize = e.speech_queue.qsize()
+        v_state = "warn" if qsize > 5 else ("ok" if e.voice else "warn")
+        v_note = (f"{qsize} чакащи" if qsize else
+                  ("готов" if e.voice else "гласът още не е зареден"))
+
+        # Live AI
+        if e.live_running and e.live_ws is not None:
+            l_state, l_note = "ok", ("AI-то говори" if e.live_model_speaking else "сесията е отворена")
+        elif e.live_running:
+            l_state, l_note = "warn", "свързва се"
+        else:
+            l_state, l_note = "idle", "изключен"
+
+        with e.live_buffer_lock:
+            buffered = len(e.live_event_buffer)
+
+        return {
+            "api": api,
+            "tiktok": {"state": tt_state, "note": tt_note,
+                       "source": e.connection_mode.get(),
+                       "follows": e.stat_follows, "shares": e.stat_shares,
+                       "gifts": e.stat_gifts, "comments": e.stat_comments,
+                       "viewers": e.stat_viewers},
+            "voice": {"state": v_state, "note": v_note, "queue": qsize,
+                      "voice": e.voice_engine_menu.get().split(" (")[0],
+                      "shuffle": e.voice_shuffle_var.get(),
+                      "effect": e.voice_effect_menu.get(),
+                      "muted": e.muted, "mode": e.output_mode.get()},
+            "live": {"state": l_state, "note": l_note,
+                     "model": e.live_model_entry.get(),
+                     "setup_level": e.live_setup_level,
+                     "buffered": buffered,
+                     "mic": e.mic_active,
+                     "mic_chunks": e.mic_chunks_sent,
+                     "speaking": e.live_model_speaking},
+            "filters": {"state": "ok", "note": "активни",
+                        "spam": e.spam_filter_var.get(),
+                        "words": e.filter_var.get(),
+                        "mentions": e.strip_mentions_var.get(),
+                        "shlyokavitsa": e.shlyokavitsa_var.get(),
+                        "heart_me": e.heart_me_filter_var.get(),
+                        "max_chars": e.max_chars_entry.get()},
+        }
+
     def get_log(self):
         return list(self.engine.log_lines)
 

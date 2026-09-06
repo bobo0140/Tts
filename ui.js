@@ -9,6 +9,7 @@ const PROFILES = ["Само TTS", "Само Live AI", "Пълно"];
 const OUTPUTS  = ["TTS гласове", "Само Live AI", "И двете"];
 
 const PAGES = {
+  dash:    { icon: "📊", label: "Табло" },
   home:    { icon: "🏠", label: "Начало" },
   filters: { icon: "🛡", label: "Филтри" },
   voice:   { icon: "🔊", label: "Глас" },
@@ -17,9 +18,9 @@ const PAGES = {
 };
 
 const PAGES_BY_PROFILE = {
-  "Само TTS":     ["home", "filters", "voice", "test"],
-  "Само Live AI": ["home", "filters", "ai", "test"],
-  "Пълно":        ["home", "filters", "voice", "ai", "test"],
+  "Само TTS":     ["dash", "home", "filters", "voice", "test"],
+  "Само Live AI": ["dash", "home", "filters", "ai", "test"],
+  "Пълно":        ["dash", "home", "filters", "voice", "ai", "test"],
 };
 
 let page = "home";
@@ -204,7 +205,79 @@ function pageTest() {
   );
 }
 
-const BUILDERS = { home: pageHome, filters: pageFilters, voice: pageVoice, ai: pageAI, test: pageTest };
+const BUILDERS = { dash: pageDash, home: pageHome, filters: pageFilters, voice: pageVoice, ai: pageAI, test: pageTest };
+
+/* ---------- Табло ---------- */
+function pageDash() {
+  return `<div id="dash-grid" class="dash">
+    <div class="card"><h2>Зареждане…</h2></div></div>`;
+}
+
+const ST_ICON = { ok: "🟢", warn: "🟡", err: "🔴", idle: "⚪" };
+
+function mod(title, m, rows) {
+  return `<div class="card mod">
+    <h2>${ST_ICON[m.state] || "⚪"} ${title}</h2>
+    <p class="sub">${esc(m.note || "")}</p>
+    <div class="kv">${rows.filter(Boolean).map(([k, v, cls]) =>
+      `<div><span>${k}</span><b class="${cls || ""}">${v}</b></div>`).join("")}</div>
+  </div>`;
+}
+
+function renderDash(M) {
+  const box = document.getElementById("dash-grid");
+  if (!box) return;
+  const a = M.api, t = M.tiktok, v = M.voice, l = M.live, f = M.filters;
+
+  const reasons = Object.entries(a.reasons || {});
+  const reasonTxt = reasons.length
+    ? reasons.map(([k, n]) => `${k}: ${n}`).join(", ") : "няма";
+
+  box.innerHTML =
+    mod("Gemini API", a, [
+      ["Заявки общо", `${a.total}`],
+      ["Успешни / Откази", `<span class="g">${a.ok}</span> / <span class="${a.failed ? "r" : ""}">${a.failed}</span>`],
+      ["Последна минута", `${a.min_ok} ок, ${a.min_fail} откази`],
+      ["Последен час", `${a.hour_ok} ок, ${a.hour_fail} откази`],
+      ["Средно време", a.avg_ms ? `${a.avg_ms} ms` : "—"],
+      ["Най-бавна", a.slowest_ms ? `${a.slowest_ms} ms` : "—"],
+      ["Причини за отказ", reasonTxt],
+      a.backoff_left ? ["Отдръпване", `${a.backoff_left} сек`, "r"] : null,
+      ["Достъпни модели", a.available.length ? `${a.available.length}` : "непроверени"],
+      a.last_error ? ["Последна грешка", `${esc(a.last_error)} (преди ${a.last_error_ago} сек)`, "r"] : null,
+    ]) +
+    mod("TikTok", t, [
+      ["Източник", esc(t.source)],
+      ["Зрители", t.viewers],
+      ["Последователи", t.follows],
+      ["Споделяния", t.shares],
+      ["Подаръци", t.gifts],
+      ["Коментари", t.comments],
+    ]) +
+    mod("Глас", v, [
+      ["Глас", esc(v.voice) + (v.shuffle ? " (разбъркване)" : "")],
+      ["Ефект", esc(v.effect)],
+      ["Опашка", v.queue],
+      ["Режим", esc(v.mode)],
+      ["Заглушено", v.muted ? "<span class='r'>да</span>" : "не"],
+    ]) +
+    mod("Live AI", l, [
+      ["Модел", esc(l.model)],
+      ["Ниво на setup", l.setup_level],
+      ["Чакащи събития", l.buffered],
+      ["Микрофон", l.mic ? "<span class='g'>включен</span>" : "изключен"],
+      ["Изпратен звук", l.mic_chunks ? `${(l.mic_chunks * 0.1).toFixed(1)} сек` : "—"],
+      ["В момента говори", l.speaking ? "AI-то" : "никой"],
+    ]) +
+    mod("Филтри", f, [
+      ["Анти-спам", f.spam ? "вкл." : "изкл."],
+      ["Забранени думи", f.words ? "вкл." : "изкл."],
+      ["@споменавания", f.mentions ? "махат се" : "четат се"],
+      ["Шльокавица", f.shlyokavitsa ? "превежда се" : "не"],
+      ["Само Heart Me", f.heart_me ? "вкл." : "изкл."],
+      ["Макс. символи", esc(String(f.max_chars))],
+    ]);
+}
 
 /* ---------- рендиране ---------- */
 function renderNav() {
@@ -318,6 +391,10 @@ async function poll() {
     const mb = document.getElementById("btn-mute");
     mb.textContent = st.muted ? "🔇 Заглушено" : "🔊 Заглуши";
     mb.className = st.muted ? "danger" : "ghost";
+
+    if (page === "dash") {
+      try { renderDash(await api.get_metrics()); } catch (e) {}
+    }
 
     if (st.log_len !== logCache.length) {
       logCache = await api.get_log();
