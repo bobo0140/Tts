@@ -224,6 +224,59 @@ function mod(title, m, rows) {
   </div>`;
 }
 
+function liveCard(m, l) {
+  const rows = [
+    ["Състояние", `<b>${esc(m.label || "?")}</b>${m.detail ? " — " + esc(m.detail) : ""}`],
+    ["В това състояние", `${m.in_state_sec || 0} сек`],
+    ["Модел", esc(l.model)],
+    ["Ниво на setup", `${m.setup_level ?? 0}${m.setup_rejections ? ` (${m.setup_rejections} отказа)` : ""}`,
+      m.setup_rejections ? "r" : ""],
+    ["Сесии / Пресвързвания", `${m.sessions || 0} / ${m.reconnects || 0}`, m.reconnects > 2 ? "r" : ""],
+    ["Текуща сесия", m.session_sec ? `${m.session_sec} сек` : "—"],
+    ["Средна сесия", m.avg_session_sec ? `${m.avg_session_sec} сек` : "—"],
+    ["Завършени ходове", `${m.turns || 0}${m.interrupts ? ` (${m.interrupts} прекъснати)` : ""}`],
+    ["Звук от AI-то", m.audio_out_sec ? `${m.audio_out_sec} сек` : "—"],
+    ["Звук от микрофона", m.audio_in_sec ? `${m.audio_in_sec} сек` : "—"],
+    ["Изпратени събития", `${m.events_sent || 0}${m.events_dropped ? ` (${m.events_dropped} изхвърлени)` : ""}`,
+      m.events_dropped ? "r" : ""],
+    ["Чакащи в буфера", l.buffered],
+    m.last_error ? ["Последна грешка", `${esc(m.last_error)} (преди ${m.last_error_ago} сек)`, "r"] : null,
+  ];
+  return `<div class="card mod">
+    <h2>${ST_ICON[m.color] || "⚪"} Live AI</h2>
+    <p class="sub">Състоянието е едно и явно — вече не се извежда от няколко флага.</p>
+    <div class="kv">${rows.filter(Boolean).map(([k, v, cls]) =>
+      `<div><span>${k}</span><b class="${cls || ""}">${v}</b></div>`).join("")}</div>
+    <div class="toolbar">${btn("🔬 Самотест на Live", "liveSelfTest()")}</div>
+  </div>`;
+}
+
+async function liveSelfTest() {
+  wiz = { step: 3, mode: S.profile, selftest: true };
+  document.getElementById("setup").classList.add("on");
+  document.getElementById("w-title").textContent = "Самотест на Live AI";
+  document.getElementById("w-sub").textContent = "Проверявам само този модул.";
+  document.getElementById("w-back").style.visibility = "hidden";
+  document.getElementById("w-skip").style.display = "none";
+  const next = document.getElementById("w-next");
+  next.textContent = "Изчакай…"; next.disabled = true;
+  document.getElementById("w-body").innerHTML =
+    `<ul class="steps" id="w-steps"><li><span class="ic"><i class="spin"></i></span>
+     <span class="nm">Започвам…</span></li></ul>`;
+
+  await api.selftest_live();
+  const tick = setInterval(async () => {
+    const st = await api.wizard_state();
+    const box = document.getElementById("w-steps");
+    if (box) box.outerHTML = stepsHtml(st.steps).replace("<ul", '<ul id="w-steps"');
+    if (st.done) {
+      clearInterval(tick);
+      next.textContent = "Затвори"; next.disabled = false;
+      next.onclick = () => { document.getElementById("setup").classList.remove("on"); next.onclick = wizNext; };
+    }
+  }, 400);
+}
+
 function renderDash(M) {
   const box = document.getElementById("dash-grid");
   if (!box) return;
@@ -261,14 +314,7 @@ function renderDash(M) {
       ["Режим", esc(v.mode)],
       ["Заглушено", v.muted ? "<span class='r'>да</span>" : "не"],
     ]) +
-    mod("Live AI", l, [
-      ["Модел", esc(l.model)],
-      ["Ниво на setup", l.setup_level],
-      ["Чакащи събития", l.buffered],
-      ["Микрофон", l.mic ? "<span class='g'>включен</span>" : "изключен"],
-      ["Изпратен звук", l.mic_chunks ? `${(l.mic_chunks * 0.1).toFixed(1)} сек` : "—"],
-      ["В момента говори", l.speaking ? "AI-то" : "никой"],
-    ]) +
+    liveCard(M.live_mod || {}, l) +
     mod("Филтри", f, [
       ["Анти-спам", f.spam ? "вкл." : "изкл."],
       ["Забранени думи", f.words ? "вкл." : "изкл."],

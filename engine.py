@@ -28,7 +28,9 @@ from piper import PiperVoice
 from piper.config import SynthesisConfig
 from piper.download_voices import download_voice
 
+import live_module as LM
 from api_module import ApiMetrics, classify
+from live_module import LiveMetrics
 from core_lib import (
     APP_VERSION, BASE_DIR, CONFIG_PATH, MODEL_PATH, VOICE_NAME, VOICES_DIR, HEART_ME_GIFT_NAME, LIVE_INPUT_RATE, LIVE_OUTPUT_RATE,
     LIVE_MODELS, LIVE_SYSTEM_PROMPT, LIVE_WS_URL, PERSONALITIES, PROFILES,
@@ -242,6 +244,7 @@ class Engine:
         self.hotkey_active = False
 
         self.api = ApiMetrics()      # броячи за заявките към Gemini
+        self.live = LiveMetrics()    # състояние и броячи за Live AI
 
         self.wizard_steps = []
         self.wizard_done = False
@@ -676,7 +679,10 @@ class Engine:
             # Ако AI-то говори дълго при наплив, буферът не бива да расте
             # безкрайно — пазим последните 40 събития.
             if len(self.live_event_buffer) > 40:
-                del self.live_event_buffer[:-40]
+                over = len(self.live_event_buffer) - 40
+                del self.live_event_buffer[:over]
+                for _ in range(over):
+                    self.live.note_event(dropped=True)
 
     def _live_batch_worker(self):
         """Праща натрупаните събития. Реагира БЪРЗО на единично събитие, а
@@ -718,6 +724,7 @@ class Engine:
             message = self._compose_batch_message(events)
             if message:
                 self.live_text_queue.put(message)
+                self.live.note_event()
                 delay = round(time.time() - self.live_buffer_started, 1)
                 self._log(f"[Live AI ->] {len(events)} събития, изчакани {delay} сек.")
 
@@ -1210,6 +1217,8 @@ class Engine:
             return
 
         self.live_running = True
+        self.live.set_state(LM.CONNECTING, "отваря сесия")
+        self.live.note_session()
         self.live_session_id += 1          # всяка нова сесия обезсилва старите
         session_id = self.live_session_id
         pass
@@ -1222,6 +1231,7 @@ class Engine:
 
     def stop_live_ai(self):
         self.live_running = False
+        self.live.set_state(LM.OFF, "спрян ръчно")
         self.live_session_id += 1        # обезсилва всички текущи нишки
         self.live_resume_handle = None   # ръчно спиране = нова сесия следващия път
         self.live_setup_level = 0
@@ -1335,6 +1345,7 @@ class Engine:
                 # Затова смятаме хода за приключил и след 2 сек тишина.
                 if self.live_model_speaking and (time.time() - self.live_last_audio_ts) > 2.0:
                     self.live_model_speaking = False
+                    self.live.set_state(LM.READY, "тишина — ходът приключи")
                     self._flush_transcripts()
 
                 user_speaking = (time.time() - self.live_last_voice_ts) < 1.5
@@ -1388,10 +1399,14 @@ class Engine:
 
                 if server_content.get("interrupted"):
                     self.live_model_speaking = False
+                    self.live.note_interrupt()
+                    self.live.set_state(LM.READY, "прекъснат")
                     self._flush_transcripts()
                     self._log("[Live AI] Прекъснат (заговорил си докато AI-то говори).")
                 if server_content.get("turnComplete"):
                     self.live_model_speaking = False
+                    self.live.note_turn()
+                    self.live.set_state(LM.READY, "чака")
                     self._flush_transcripts()
 
                 # Транскрипцията идва на малки парчета (дума по дума).
@@ -1408,8 +1423,11 @@ class Engine:
                     inline = part.get("inlineData") or {}
                     data_b64 = inline.get("data")
                     if data_b64:
+                        if not self.live_model_speaking:
+                            self.live.set_state(LM.SPEAKING)
                         self.live_model_speaking = True
                         self.live_last_audio_ts = time.time()
+                        self.live.note_audio_out(len(data_b64))
                     if (data_b64 and out_stream is not None and not self.muted
                             and session_id == self.live_session_id):
                         try:
@@ -1515,6 +1533,8 @@ class Engine:
                     self._log("[Live AI] Setup потвърден от сървъра.")
 
                 self.live_setup_level = level   # запомняме кое ниво работи
+                self.live.note_setup(level)
+                self.live.set_state(LM.READY, f"ниво '{SETUP_LEVELS[level]}'")
                 self.api.record(f"live:{model}", True)
                 self._log("[Live AI] Свързан и готов. Пробвай да кажеш нещо или пусни тест.")
                 self._set_status("live", "● Live AI активен", "ok")
@@ -1569,6 +1589,8 @@ class Engine:
 
                     # Лош ключ = окончателно. Няма смисъл да пробваме нива.
                     self.api.record(f"live:{model}", False, reason=classify(detail))
+                    self.live.note_setup(level, rejected=True)
+                    self.live.note_error(detail)
                     if "API key not valid" in detail or "API_KEY_INVALID" in detail:
                         self.live_fatal = True
                         self._log("[Live AI] Google отхвърли ключа като невалиден.")
@@ -1637,6 +1659,7 @@ class Engine:
                 self._set_btn()
                 self._set_status("live", "○ Live AI спрян (лош ключ)", "err")
                 self.live_fatal = False
+                self.live.set_state(LM.FAILED, "ключът е отхвърлен")
                 return
 
             # Ако междувременно е стартирана нова сесия (или е натиснат Стоп),
@@ -1651,6 +1674,8 @@ class Engine:
                     self._log("[Live AI] Пресвързвам се и продължавам сесията...")
                 else:
                     self._log("[Live AI] Връзката падна — пресвързвам се...")
+                self.live.set_state(LM.RECONNECTING)
+                self.live.note_reconnect()
                 self._set_status("live", "◌ Live AI пресвързване...", "warn")
                 time.sleep(1.5)
                 if self.live_running and session_id == self.live_session_id:
@@ -1704,6 +1729,7 @@ class Engine:
 
             self.live_mic_queue.put(chunk)
             self.mic_chunks_sent += 1
+            self.live.note_audio_in()
 
         try:
             self.live_mic_stream = sd.RawInputStream(
@@ -2404,6 +2430,7 @@ class Engine:
     # ==================================================================
     def wizard_reset(self):
         self.api = ApiMetrics()      # броячи за заявките към Gemini
+        self.live = LiveMetrics()    # състояние и броячи за Live AI
 
         self.wizard_steps = []
         self.wizard_done = False
@@ -2562,3 +2589,88 @@ class Engine:
         self.wizard_ok = not fatal
         self.wizard_done = True
         self._log("[Проверка] " + ("✓ Всичко е наред." if not fatal else "✗ Има проблеми — виж списъка."))
+
+    # ==================================================================
+    # Самотест само на Live модула
+    # ==================================================================
+    def selftest_live(self):
+        """Отваря сесия, праща изречение, чака аудио, затваря — и казва
+        точно докъде е стигнал. Не пипа останалите модули."""
+        threading.Thread(target=self._selftest_live_worker, daemon=True).start()
+
+    def _selftest_live_worker(self):
+        self.wizard_reset()
+        key = self.gemini_api_key_entry.get().strip()
+
+        self._w("Ключ", "run")
+        if not key:
+            self._w("Ключ", "err", "липсва")
+            self.wizard_done, self.wizard_ok = True, False
+            return
+        bad = [c for c in key if not (32 < ord(c) < 127)]
+        if bad:
+            self._w("Ключ", "err", f"непозволени знаци: {bad[:4]}")
+            self.wizard_done, self.wizard_ok = True, False
+            return
+        self._w("Ключ", "ok", f"{len(key)} знака")
+
+        was_running = self.live_running
+        if not was_running:
+            self._w("Отваряне на сесия", "run")
+            self.start_live_ai()
+        else:
+            self._w("Отваряне на сесия", "ok", "вече беше отворена")
+
+        for _ in range(50):
+            if self.live_running and self.live_ws is not None:
+                break
+            if self.live_fatal:
+                break
+            time.sleep(0.3)
+
+        if not (self.live_running and self.live_ws is not None):
+            self._w("Отваряне на сесия", "err", self.live.last_error or "не се отвори")
+            self.wizard_done, self.wizard_ok = True, False
+            return
+        if not was_running:
+            self._w("Отваряне на сесия", "ok",
+                    f"ниво '{SETUP_LEVELS[self.live_setup_level]}'")
+
+        # --- проверяваме дали наистина се връща звук ---
+        self._w("Отговор с глас", "run")
+        before = self.live.audio_out_bytes
+        turns_before = self.live.turns
+        self.live_text_queue.put(
+            "Това е проверка на връзката. Кажи само: проверката мина успешно."
+        )
+
+        got_audio = False
+        for _ in range(40):
+            time.sleep(0.4)
+            if self.live.audio_out_bytes > before:
+                got_audio = True
+            if self.live.turns > turns_before:
+                break
+
+        if got_audio:
+            secs = round((self.live.audio_out_bytes - before) * 0.75 / 48000, 1)
+            self._w("Отговор с глас", "ok", f"получени ~{secs} сек звук")
+        else:
+            self._w("Отговор с глас", "err", "не се върна аудио")
+
+        # --- микрофон (само ако е включен) ---
+        if self.mic_active:
+            self._w("Микрофон", "run")
+            before_in = self.live.audio_in_chunks
+            time.sleep(3)
+            sent = self.live.audio_in_chunks - before_in
+            if sent > 5:
+                self._w("Микрофон", "ok", f"изпратени {round(sent * 0.1, 1)} сек")
+            else:
+                self._w("Микрофон", "warn", "почти нищо не влиза — провери устройството")
+        else:
+            self._w("Микрофон", "warn", "изключен — не се проверява")
+
+        self.wizard_ok = got_audio
+        self.wizard_done = True
+        self._log("[Самотест Live] " + ("✓ Модулът работи." if got_audio else "✗ Има проблем."))

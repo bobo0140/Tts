@@ -185,8 +185,11 @@ class Api:
         with e.live_buffer_lock:
             buffered = len(e.live_event_buffer)
 
+        live_m = e.live.snapshot()
+
         return {
             "api": api,
+            "live_mod": live_m,
             "tiktok": {"state": tt_state, "note": tt_note,
                        "source": e.connection_mode.get(),
                        "follows": e.stat_follows, "shares": e.stat_shares,
@@ -342,6 +345,7 @@ for _m in [
     "test_burst_follows", "test_burst_shares", "test_burst_gifts",
     "test_burst_comments", "test_gemini_connection", "test_ai_commentator",
     "test_microphone", "test_audio_output", "test_api_full", "test_live_feed",
+    "selftest_live",
 ]:
     setattr(Api, _m, _delegate(_m))
 
