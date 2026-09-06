@@ -23,6 +23,7 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+import pygame
 import edge_tts
 from piper import PiperVoice
 from piper.config import SynthesisConfig
@@ -112,6 +113,8 @@ class Engine:
         threading.Thread(target=self._ai_worker, daemon=True).start()
         threading.Thread(target=self._live_batch_worker, daemon=True).start()
         threading.Thread(target=self._ensure_voice_ready, daemon=True).start()
+        # Засичаме устройствата веднага, за да не са празни менютата
+        threading.Thread(target=self._detect_devices, daemon=True).start()
 
     # ------------------------------------------------------------------
     def _init_settings(self):
@@ -243,6 +246,11 @@ class Engine:
         self.mic_chunks_sent = 0
         self.hotkey_active = False
 
+        self.audio_out_open = False
+        self.audio_out_info = "още не е отварян"
+        self.audio_fallback = False
+        self.audio_written_bytes = 0
+        self._fb_buf = b""
         self.api = ApiMetrics()      # броячи за заявките към Gemini
         self.live = LiveMetrics()    # състояние и броячи за Live AI
 
@@ -1428,7 +1436,8 @@ class Engine:
                         self.live_model_speaking = True
                         self.live_last_audio_ts = time.time()
                         self.live.note_audio_out(len(data_b64))
-                    if (data_b64 and out_stream is not None and not self.muted
+                    if (data_b64 and not self.muted
+                            and (out_stream is not None or getattr(self, "audio_fallback", False))
                             and session_id == self.live_session_id):
                         try:
                             pcm = base64.b64decode(data_b64)
@@ -1450,7 +1459,11 @@ class Engine:
                                         )
                                 samples = np.clip(samples, -32768, 32767)
                                 pcm = samples.astype(np.int16).tobytes()
-                            out_stream.write(pcm)
+                            if out_stream is not None:
+                                out_stream.write(pcm)
+                            elif getattr(self, "audio_fallback", False):
+                                self._play_pcm_fallback(pcm, out_rate)
+                            self.audio_written_bytes = getattr(self, "audio_written_bytes", 0) + len(pcm)
                         except Exception:
                             pass
                     text = part.get("text")
@@ -1493,18 +1506,39 @@ class Engine:
                 if out_stream is None:
                     raise last_err or RuntimeError("няма подходяща честота")
 
+                self.audio_out_open = True
+                try:
+                    import sounddevice as _sd
+                    _name = _sd.query_devices(dev, "output")["name"][:40]
+                except Exception:
+                    _name = "(по подразбиране)"
+                self.audio_out_info = f"{_name} @ {out_rate} Hz"
                 if out_rate != LIVE_OUTPUT_RATE:
                     self._log(
                         f"[Live AI] Аудио изходът работи на {out_rate} Hz "
-                        f"(картата не приема {LIVE_OUTPUT_RATE} Hz) — преобразувам."
+                        f"(картата не приема {LIVE_OUTPUT_RATE} Hz) — преобразувам. "
+                        f"Устройство: {_name}"
                     )
                 else:
-                    self._log("[Live AI] Аудио изходът е отворен.")
+                    self._log(f"[Live AI] Аудио изходът е отворен: {_name} @ {out_rate} Hz")
             except Exception as e:
-                self._log(
-                    f"[Live AI] НЯМА ИЗХОД ЗА ЗВУК ({e}) — ще виждаш само текста. "
-                    "Пробвай друго устройство от 'Изход за звука на AI-то'."
-                )
+                # Резервен път: ако sounddevice не работи (липсва PortAudio,
+                # заето устройство и т.н.), пускаме звука през pygame, който
+                # и без това работи за локалните гласове.
+                out_stream = None
+                self.audio_out_open = False
+                self.audio_out_info = f"sounddevice отказа: {str(e)[:50]}"
+                self._log(f"[Live AI] Основният аудио изход отказа ({e}).")
+                try:
+                    if pygame.mixer.get_init() is None:
+                        pygame.mixer.init()
+                    self.audio_fallback = True
+                    self.audio_out_open = True
+                    self.audio_out_info = "резервен изход (pygame)"
+                    self._log("[Live AI] Ползвам резервен изход през pygame — звукът ще се чува.")
+                except Exception as e2:
+                    self.audio_fallback = False
+                    self._log(f"[Live AI] И резервният изход отказа ({e2}) — само текст.")
 
             async with websockets.connect(url, max_size=None) as ws:
                 self.live_ws = ws
@@ -2429,6 +2463,11 @@ class Engine:
     # Проверка при стартиране (съветник)
     # ==================================================================
     def wizard_reset(self):
+        self.audio_out_open = False
+        self.audio_out_info = "още не е отварян"
+        self.audio_fallback = False
+        self.audio_written_bytes = 0
+        self._fb_buf = b""
         self.api = ApiMetrics()      # броячи за заявките към Gemini
         self.live = LiveMetrics()    # състояние и броячи за Live AI
 
@@ -2674,3 +2713,46 @@ class Engine:
         self.wizard_ok = got_audio
         self.wizard_done = True
         self._log("[Самотест Live] " + ("✓ Модулът работи." if got_audio else "✗ Има проблем."))
+
+
+    def _detect_devices(self):
+        """Пълни списъците с устройства при стартиране."""
+        try:
+            self._refresh_mic_devices()
+        except Exception as e:
+            self._log(f"[Микрофон] Не мога да прочета входните устройства: {e}")
+        try:
+            self._refresh_output_devices()
+        except Exception as e:
+            self._log(f"[Звук] Не мога да прочета изходните устройства: {e}")
+
+
+    def _play_pcm_fallback(self, pcm: bytes, rate: int):
+        """Пуска суров PCM през pygame — резервен път, ако sounddevice липсва.
+        Трупа малки парчета, за да не се накъсва."""
+        buf = getattr(self, "_fb_buf", b"") + pcm
+        # ~0.35 сек на порция: достатъчно голямо, за да звучи слято
+        need = int(rate * 2 * 0.35)
+        if len(buf) < need:
+            self._fb_buf = buf
+            return
+        self._fb_buf = b""
+
+        try:
+            fd, path = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            with wave.open(path, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(rate)
+                wf.writeframes(buf)
+            snd = pygame.mixer.Sound(path)
+            ch = snd.play()
+            while ch and ch.get_busy():
+                if self.muted:
+                    ch.stop()
+                    break
+                time.sleep(0.02)
+            os.remove(path)
+        except Exception as e:
+            self._log(f"[Live AI] Резервният изход даде грешка: {e}")

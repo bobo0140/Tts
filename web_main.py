@@ -206,7 +206,10 @@ class Api:
                      "buffered": buffered,
                      "mic": e.mic_active,
                      "mic_chunks": e.mic_chunks_sent,
-                     "speaking": e.live_model_speaking},
+                     "speaking": e.live_model_speaking,
+                     "audio_open": e.audio_out_open,
+                     "audio_info": e.audio_out_info,
+                     "audio_written_sec": round(getattr(e, "audio_written_bytes", 0) / 48000, 1)},
             "filters": {"state": "ok", "note": "активни",
                         "spam": e.spam_filter_var.get(),
                         "words": e.filter_var.get(),
@@ -233,6 +236,16 @@ class Api:
             self.engine._log(f"[Лог] Запазен във {p.name}.")
         except Exception as ex:
             self.engine._log(f"[Лог] Грешка: {ex}")
+
+    def get_devices(self) -> dict:
+        """Списъците се четат при поискване — иначе менютата остават празни."""
+        e = self.engine
+        return {
+            "mic": getattr(e, "mic_device_list", ["(по подразбиране)"]),
+            "out": getattr(e, "output_device_list", ["(по подразбиране)"]),
+            "mic_sel": e.mic_device_menu.get(),
+            "out_sel": e.output_device_menu.get(),
+        }
 
     def set_setting(self, key, value):
         e = self.engine

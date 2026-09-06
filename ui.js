@@ -157,8 +157,8 @@ function pageAI() {
   + card("Микрофон", "За да те слуша Live AI-то.",
       check("live_mic_var", "Пусни микрофона")
     + check("half_duplex_var", "Избягвай ехо (спира микрофона докато AI-то говори)")
-    + `<div class="row"><label>Устройство</label><div class="grow">${select("mic_device_menu", S._mic_devices || ["(по подразбиране)"])}</div>${btn("Опресни","api.refresh_mic_devices()")}</div>`
-    + `<div class="row"><label>Изход за звука</label><div class="grow">${select("output_device_menu", S._out_devices || ["(по подразбиране)"])}</div>${btn("Опресни","api.refresh_output_devices()")}</div>`
+    + `<div class="row"><label>Устройство</label><div class="grow">${select("mic_device_menu", S._mic_devices || ["(по подразбиране)"])}</div>${btn("Опресни","refreshDevices()")}</div>`
+    + `<div class="row"><label>Изход за звука</label><div class="grow">${select("output_device_menu", S._out_devices || ["(по подразбиране)"])}</div>${btn("Опресни","refreshDevices()")}</div>`
     + row("Клавиш микрофон", num("hotkey_entry") + " " + `<span style="display:inline-block;width:200px">${select("hotkey_mode_menu",["Задръж за говорене","Вкл./изкл. с натискане"])}</span>`)
     + row("Клавиш заглушаване", num("mute_hotkey_entry"))
     + `<div class="toolbar">${btn("Активирай клавишите","api.toggle_hotkey()")}</div>`
@@ -235,7 +235,13 @@ function liveCard(m, l) {
     ["Текуща сесия", m.session_sec ? `${m.session_sec} сек` : "—"],
     ["Средна сесия", m.avg_session_sec ? `${m.avg_session_sec} сек` : "—"],
     ["Завършени ходове", `${m.turns || 0}${m.interrupts ? ` (${m.interrupts} прекъснати)` : ""}`],
-    ["Звук от AI-то", m.audio_out_sec ? `${m.audio_out_sec} сек` : "—"],
+    ["Изход за звука", l.audio_open
+       ? `<span class='g'>${esc(l.audio_info)}</span>`
+       : `<span class='r'>${esc(l.audio_info || "не е отворен")}</span>`,
+      l.audio_open ? "" : "r"],
+    ["Звук получен / пуснат",
+      `${m.audio_out_sec || 0} / ${l.audio_written_sec || 0} сек`,
+      (m.audio_out_sec > 0.5 && !l.audio_written_sec) ? "r" : ""],
     ["Звук от микрофона", m.audio_in_sec ? `${m.audio_in_sec} сек` : "—"],
     ["Изпратени събития", `${m.events_sent || 0}${m.events_dropped ? ` (${m.events_dropped} изхвърлени)` : ""}`,
       m.events_dropped ? "r" : ""],
@@ -249,6 +255,23 @@ function liveCard(m, l) {
       `<div><span>${k}</span><b class="${cls || ""}">${v}</b></div>`).join("")}</div>
     <div class="toolbar">${btn("🔬 Самотест на Live", "liveSelfTest()")}</div>
   </div>`;
+}
+
+async function refreshDevices() {
+  await api.refresh_mic_devices();
+  await api.refresh_output_devices();
+  await loadDevices();
+  renderPage();
+}
+
+async function loadDevices() {
+  try {
+    const d = await api.get_devices();
+    S._mic_devices = d.mic;
+    S._out_devices = d.out;
+    S.mic_device_menu = d.mic_sel;
+    S.output_device_menu = d.out_sel;
+  } catch (e) {}
 }
 
 async function liveSelfTest() {
@@ -463,6 +486,7 @@ async function boot() {
   }
   ready = true;
   renderSegs(); renderNav(); renderPage();
+  setTimeout(async () => { await loadDevices(); if (page === "ai") renderPage(); }, 1500);
   setInterval(poll, 500);
   try { if (await api.needs_setup()) wizShow(); } catch (e) {}
 }

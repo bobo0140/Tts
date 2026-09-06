@@ -38,6 +38,8 @@ jobs:
             --collect-all edge_tts `
             --collect-all TikTokLive `
             --collect-all sounddevice `
+            --collect-binaries sounddevice `
+            --collect-all _sounddevice_data `
             --collect-all keyboard `
             web_main.py
 
