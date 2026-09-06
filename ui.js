@@ -333,4 +333,161 @@ window.addEventListener("pywebviewready", async () => {
   ready = true;
   renderSegs(); renderNav(); renderPage();
   setInterval(poll, 500);
+  if (await api.needs_setup()) wizShow();
 });
+
+/* ======================= Съветник при стартиране ======================= */
+let wiz = { step: 0, mode: null, source: null };
+
+const WIZ_LAST = 4;
+
+function wizShow() { document.getElementById("setup").classList.add("on"); wizRender(); }
+function wizHide() { document.getElementById("setup").classList.remove("on"); }
+
+function wizPick(field, value) { wiz[field] = value; wizRender(); }
+
+function wizRender() {
+  const T = document.getElementById("w-title");
+  const U = document.getElementById("w-sub");
+  const B = document.getElementById("w-body");
+  const next = document.getElementById("w-next");
+  const back = document.getElementById("w-back");
+  const skip = document.getElementById("w-skip");
+
+  back.style.visibility = wiz.step === 0 ? "hidden" : "visible";
+  skip.style.display = wiz.step === WIZ_LAST - 1 ? "" : "none";
+  next.style.display = "";
+  next.textContent = "Продължи";
+  next.disabled = false;
+
+  /* --- 0: какво ще ползваме --- */
+  if (wiz.step === 0) {
+    T.textContent = "Какво ще ползваш?";
+    U.textContent = "Може да смениш по всяко време след това.";
+    B.innerHTML = `
+      <button class="pick ${wiz.mode === "Само TTS" ? "on" : ""}" onclick="wizPick('mode','Само TTS')">
+        <span class="pi">🔊</span><span><b>Само TTS гласове</b>
+        <span>Български гласове четат коментарите. Работи офлайн, без ключове, най-бързо.</span></span></button>
+      <button class="pick ${wiz.mode === "Само Live AI" ? "on" : ""}" onclick="wizPick('mode','Само Live AI')">
+        <span class="pi">🤖</span><span><b>Само Live AI</b>
+        <span>AI-то говори със свой глас, коментира чата и може да те слуша. Нужен е безплатен Gemini ключ.</span></span></button>
+      <button class="pick ${wiz.mode === "Пълно" ? "on" : ""}" onclick="wizPick('mode','Пълно')">
+        <span class="pi">✨</span><span><b>И двете</b>
+        <span>Гласовете четат коментарите, а AI-то коментира отгоре.</span></span></button>`;
+    next.disabled = !wiz.mode;
+    return;
+  }
+
+  /* --- 1: откъде идват коментарите --- */
+  if (wiz.step === 1) {
+    T.textContent = "Откъде да чета чата?";
+    U.textContent = "TikFinity е по-стабилно, ако директната връзка се къса.";
+    B.innerHTML = `
+      <button class="pick ${wiz.source === "tikfinity" ? "on" : ""}" onclick="wizPick('source','tikfinity')">
+        <span class="pi">🔌</span><span><b>През TikFinity<span class="tag">препоръчано</span></b>
+        <span>Изисква TikFinity да е пуснат и свързан към стрийма. По-стабилно, без грешки от TikTok.</span></span></button>
+      <button class="pick ${wiz.source === "direct" ? "on" : ""}" onclick="wizPick('source','direct')">
+        <span class="pi">📡</span><span><b>Директно към TikTok</b>
+        <span>Без допълнителни програми, но понякога дава грешки при натоварване.</span></span></button>
+      <div style="margin-top:18px">${
+        wiz.source === "direct"
+          ? row("TikTok потребител", text("username_entry", "напр. someusername (без @)"))
+          : wiz.source === "tikfinity"
+          ? row("TikFinity адрес", text("tikfinity_url_entry"))
+          : ""}</div>`;
+    bind(); applyValues();
+    next.disabled = !wiz.source;
+    return;
+  }
+
+  /* --- 2: ключ (само ако трябва) --- */
+  if (wiz.step === 2) {
+    if (wiz.mode === "Само TTS") { wiz.step = 3; return wizRender(); }
+    T.textContent = "Gemini ключ";
+    U.textContent = "Безплатен е и се взима за минута — без карта.";
+    B.innerHTML =
+      row("API ключ", text("gemini_api_key_entry", "постави ключа тук", true))
+      + row("Твоето име", text("streamer_name_entry", "AI-то ще те заговаря по име (по избор)"))
+      + `<div class="toolbar">${btn("Вземи ключ ↗", "api.open_key_page()")}</div>`
+      + hint("Ако ключът не се поставя с Ctrl+V, натисни с десен бутон в полето. Внимавай да не хванеш интервал.");
+    bind(); applyValues();
+    return;
+  }
+
+  /* --- 3: проверката --- */
+  if (wiz.step === 3) {
+    T.textContent = "Проверявам всичко";
+    U.textContent = "Секунда — тествам връзките, преди да започнеш.";
+    next.textContent = "Изчакай…";
+    next.disabled = true;
+    B.innerHTML = `<ul class="steps" id="w-steps"><li><span class="ic"><i class="spin"></i></span>
+      <span class="nm">Започвам…</span></li></ul>`;
+    startChecks();
+    return;
+  }
+
+  /* --- 4: резултат --- */
+  if (wiz.step === 4) {
+    const ok = wiz.result && wiz.result.ok;
+    T.textContent = ok ? "Всичко е наред" : "Има какво да се оправи";
+    U.textContent = ok ? "Готов си за стрийм." : "Виж кое не мина по-долу.";
+    B.innerHTML =
+      `<div class="banner ${ok ? "ok" : "err"}">${ok
+        ? "✓ Всички проверки минаха. AI-то току-що ти го каза и на глас."
+        : "✗ Част от проверките не минаха. Може да продължиш и да ги оправиш после, или да се върнеш назад."}</div>`
+      + stepsHtml(wiz.result ? wiz.result.steps : []);
+    next.textContent = ok ? "Започваме" : "Продължи въпреки това";
+    return;
+  }
+}
+
+function stepsHtml(steps) {
+  const ic = { ok: "✅", err: "❌", warn: "⚠️", run: '<i class="spin"></i>' };
+  return `<ul class="steps">` + steps.map(s =>
+    `<li><span class="ic">${ic[s.status] || ""}</span>
+     <span class="nm">${esc(s.name)}${s.detail ? `<small>${esc(s.detail)}</small>` : ""}</span></li>`
+  ).join("") + `</ul>`;
+}
+
+async function startChecks() {
+  await api.run_wizard(wiz.mode);
+  const tick = setInterval(async () => {
+    const st = await api.wizard_state();
+    const box = document.getElementById("w-steps");
+    if (box) box.outerHTML = stepsHtml(st.steps).replace("<ul", '<ul id="w-steps"');
+    if (st.done) {
+      clearInterval(tick);
+      wiz.result = st;
+      wiz.step = 4;
+      wizRender();
+    }
+  }, 400);
+}
+
+function wizNext() {
+  if (wiz.step === WIZ_LAST) return wizFinish();
+  wiz.step++;
+  if (wiz.step === 2 && wiz.mode === "Само TTS") wiz.step = 3;
+  wizRender();
+}
+
+function wizBack() {
+  wiz.step = Math.max(0, wiz.step - 1);
+  if (wiz.step === 2 && wiz.mode === "Само TTS") wiz.step = 1;
+  wizRender();
+}
+
+function wizSkip() { wiz.step = 4; wiz.result = { ok: true, steps: [] }; wizRender(); }
+
+async function wizFinish() {
+  if (wiz.source) {
+    const cm = wiz.source === "tikfinity" ? "TikFinity (Advanced)" : "Директно (TikTok)";
+    S.connection_mode = cm;
+    await api.set_setting("connection_mode", cm);
+  }
+  await api.set_profile(wiz.mode);
+  await api.finish_setup();
+  S = await api.get_settings();
+  wizHide();
+  renderSegs(); renderNav(); renderPage();
+}

@@ -163,6 +163,49 @@
   .l-err{color:var(--err)} .l-ok{color:var(--ok)} .l-warn{color:var(--warn)}
   .l-ai{color:var(--accent-2)} .l-dbg{color:#5C5C72} .l-sys{color:var(--muted)}
   .toolbar{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap}
+
+  /* ---------- Съветник ---------- */
+  .setup{position:fixed;inset:0;z-index:50;display:none;
+    background:rgba(8,8,12,.82);backdrop-filter:blur(7px);
+    align-items:center;justify-content:center;padding:28px}
+  .setup.on{display:flex}
+  .setup-box{width:min(640px,100%);max-height:88vh;display:flex;flex-direction:column;
+    background:var(--surface);border:1px solid var(--line);border-radius:20px;
+    box-shadow:0 26px 70px #000a;overflow:hidden;animation:pop .22s ease}
+  @keyframes pop{from{opacity:0;transform:scale(.97) translateY(10px)}to{opacity:1;transform:none}}
+  .setup-head{display:flex;gap:15px;align-items:center;padding:24px 28px 20px;
+    border-bottom:1px solid var(--line);
+    background:linear-gradient(135deg,#7C5CFF14,transparent)}
+  .setup-head h2{font-size:18px;font-weight:650}
+  .setup-head p{font-size:12.5px;color:var(--muted);margin-top:2px}
+  .setup-body{padding:24px 28px;overflow-y:auto;flex:1}
+  .setup-foot{display:flex;gap:10px;align-items:center;padding:16px 28px;
+    border-top:1px solid var(--line);background:var(--surface-2)}
+
+  .pick{display:flex;gap:14px;align-items:flex-start;width:100%;text-align:left;
+    padding:17px 19px;margin-bottom:11px;border-radius:var(--r);
+    background:var(--bg);border:1.5px solid var(--line)}
+  .pick:hover{border-color:#43435E;background:#14141C}
+  .pick.on{border-color:var(--accent);background:var(--accent-dim);
+    box-shadow:0 0 0 3px #7C5CFF1F}
+  .pick .pi{font-size:24px;flex:none;line-height:1.1}
+  .pick b{display:block;font-size:14.5px;margin-bottom:3px;font-weight:650}
+  .pick span{font-size:12.5px;color:var(--muted);font-weight:400;line-height:1.5}
+  .pick .tag{display:inline-block;margin-left:8px;padding:2px 8px;border-radius:100px;
+    background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;vertical-align:2px}
+
+  .steps{list-style:none}
+  .steps li{display:flex;gap:12px;align-items:flex-start;padding:11px 0;
+    border-bottom:1px solid #1E1E2A;font-size:13.5px}
+  .steps li:last-child{border:none}
+  .steps .ic{width:22px;flex:none;text-align:center;font-size:14px}
+  .steps .nm{flex:1} .steps .nm small{display:block;color:var(--muted);font-size:11.5px;margin-top:2px}
+  .spin{display:inline-block;width:13px;height:13px;border-radius:50%;
+    border:2px solid #33334A;border-top-color:var(--accent);animation:sp .7s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .banner{padding:14px 17px;border-radius:var(--r);margin-bottom:18px;font-size:13.5px;line-height:1.55}
+  .banner.ok{background:#3DDC8418;border:1px solid #3DDC8455;color:#8FF0BE}
+  .banner.err{background:#FF5C5C18;border:1px solid #FF5C5C55;color:#FFA8A8}
 </style>
 </head>
 <body>
@@ -199,6 +242,22 @@
   <div class="body">
     <nav id="nav"></nav>
     <main id="main"></main>
+  </div>
+</div>
+
+<div id="setup" class="setup">
+  <div class="setup-box">
+    <div class="setup-head">
+      <div class="logo">🎙</div>
+      <div><h2 id="w-title">Добре дошъл</h2><p id="w-sub">Да настроим приложението за няколко секунди.</p></div>
+    </div>
+    <div class="setup-body" id="w-body"></div>
+    <div class="setup-foot">
+      <button class="ghost" id="w-back" onclick="wizBack()">Назад</button>
+      <div style="flex:1"></div>
+      <button class="ghost" id="w-skip" onclick="wizSkip()">Пропусни проверката</button>
+      <button class="primary" id="w-next" onclick="wizNext()">Продължи</button>
+    </div>
   </div>
 </div>
 

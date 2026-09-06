@@ -203,6 +203,36 @@ class Api:
     def open_key_page(self):
         webbrowser.open("https://aistudio.google.com/apikey")
 
+    # ---------------- съветник при стартиране ----------------
+    def needs_setup(self) -> bool:
+        """Показваме съветника при първо пускане или ако няма ключ/потребител."""
+        if not SETTINGS_PATH.exists():
+            return True
+        e = self.engine
+        if e.profile != "Само TTS" and not e.gemini_api_key_entry.get().strip():
+            return True
+        if e.connection_mode.get().startswith("Директно") and not e.username_entry.get().strip():
+            return True
+        return False
+
+    def run_wizard(self, mode):
+        self.engine.profile = mode
+        if mode == "Само TTS":
+            self.engine.output_mode.set("TTS гласове")
+        elif mode == "Само Live AI":
+            self.engine.output_mode.set("Само Live AI")
+        self.engine._refresh_cfg()
+        self.engine.run_wizard(mode)
+
+    def wizard_state(self):
+        e = self.engine
+        return {"steps": e.wizard_steps, "done": e.wizard_done, "ok": e.wizard_ok}
+
+    def finish_setup(self):
+        self.engine.setup_complete = True
+        self.save_settings(silent=True)
+        self.engine._log("[Проверка] Готово — приятен стрийм!")
+
     def apply_optimal_settings(self):
         e = self.engine
         e.voice_engine_menu.set(VOICE_REGISTRY["piper"]["label"])

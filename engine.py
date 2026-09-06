@@ -240,6 +240,11 @@ class Engine:
         self.mic_chunks_sent = 0
         self.hotkey_active = False
 
+        self.wizard_steps = []
+        self.wizard_done = False
+        self.wizard_ok = False
+        self.setup_complete = False
+
         self.status_text = "◌ Подготовка на гласа..."
         self.status_kind = "warn"
         self.live_status_text = "○ Live AI изключен"
@@ -2386,3 +2391,162 @@ class Engine:
         finally:
             loop.close()
             self._log("=" * 46)
+
+    # ==================================================================
+    # Проверка при стартиране (съветник)
+    # ==================================================================
+    def wizard_reset(self):
+        self.wizard_steps = []
+        self.wizard_done = False
+        self.wizard_ok = False
+
+    def _w(self, name, status, detail=""):
+        """status: 'run' | 'ok' | 'warn' | 'err'"""
+        for s in self.wizard_steps:
+            if s["name"] == name:
+                s["status"], s["detail"] = status, detail
+                return
+        self.wizard_steps.append({"name": name, "status": status, "detail": detail})
+
+    def run_wizard(self, mode: str):
+        """Проверява всичко нужно за избрания режим, стъпка по стъпка."""
+        self.wizard_reset()
+        threading.Thread(target=self._wizard_worker, args=(mode,), daemon=True).start()
+
+    def _wizard_worker(self, mode: str):
+        import urllib.error
+        import urllib.request
+
+        needs_ai = mode in ("Само Live AI", "Пълно")
+        needs_tts = mode in ("Само TTS", "Пълно")
+        fatal = False
+
+        # ---------- 1. Звуков изход ----------
+        self._w("Звуков изход", "run")
+        try:
+            import sounddevice as sd
+            sd.query_devices(kind="output")
+            self._w("Звуков изход", "ok", "намерено устройство")
+        except Exception as e:
+            self._w("Звуков изход", "err", str(e)[:80])
+            fatal = True
+
+        # ---------- 2. Български глас (само за TTS) ----------
+        if needs_tts:
+            self._w("Български глас (Dimitar)", "run")
+            for i in range(90):
+                if self.voice is not None:
+                    break
+                if i == 6:
+                    self._w("Български глас (Dimitar)", "run",
+                            "изтегля се (~60 MB, само първия път)…")
+                time.sleep(0.5)
+            if self.voice is not None:
+                self._w("Български глас (Dimitar)", "ok", "зареден")
+            else:
+                self._w("Български глас (Dimitar)", "warn",
+                        "не се зареди — ще работят само онлайн гласовете")
+
+        # ---------- 3. Gemini ключ ----------
+        if needs_ai:
+            key = self.gemini_api_key_entry.get().strip()
+            self._w("Gemini ключ", "run")
+            bad = [c for c in key if not (32 < ord(c) < 127)]
+            if not key:
+                self._w("Gemini ключ", "err", "липсва")
+                fatal = True
+            elif bad:
+                self._w("Gemini ключ", "err", f"непозволени знаци: {bad[:4]}")
+                fatal = True
+            else:
+                self._w("Gemini ключ", "ok", f"{len(key)} знака")
+
+            # ---------- 4. Връзка с Google ----------
+            models = []
+            if not fatal:
+                self._w("Връзка с Google", "run")
+                t0 = time.time()
+                try:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+                    with urllib.request.urlopen(url, timeout=20) as r:
+                        data = json.loads(r.read().decode("utf-8"))
+                    models = [m.get("name", "").replace("models/", "") for m in data.get("models", [])]
+                    self._w("Връзка с Google", "ok",
+                            f"{len(models)} модела, {round((time.time()-t0)*1000)} ms")
+                except urllib.error.HTTPError as e:
+                    self._w("Връзка с Google", "err", f"HTTP {e.code} — ключът е отхвърлен")
+                    fatal = True
+                except Exception as e:
+                    self._w("Връзка с Google", "err", str(e)[:80])
+                    fatal = True
+
+            # ---------- 5. Модели ----------
+            if not fatal:
+                tm = self.gemini_model_entry.get().strip()
+                self._w("Текстов модел", "ok" if tm in models else "warn",
+                        tm if tm in models else f"{tm} липсва — ще пробвам друг")
+                if tm not in models:
+                    alt = [m for m in models if "flash-lite" in m] or [m for m in models if "flash" in m]
+                    if alt:
+                        self.gemini_model_entry.set(alt[0])
+                        self._w("Текстов модел", "ok", f"избран {alt[0]}")
+
+                lm = self.live_model_entry.get().strip()
+                live_avail = [m for m in models if "live" in m or "native-audio" in m]
+                if lm in models:
+                    self._w("Live модел", "ok", lm)
+                elif live_avail:
+                    self.live_model_entry.set(live_avail[0])
+                    self._w("Live модел", "ok", f"избран {live_avail[0]}")
+                else:
+                    self._w("Live модел", "err", "ключът няма достъп до Live модели")
+                    fatal = True
+                self._refresh_cfg()
+
+            # ---------- 6. Live връзка + поздрав на глас ----------
+            if not fatal:
+                self._w("Live връзка", "run")
+                self.start_live_ai()
+                for _ in range(50):
+                    if self.live_running and self.live_ws is not None:
+                        break
+                    if self.live_fatal:
+                        break
+                    time.sleep(0.3)
+
+                if self.live_running and self.live_ws is not None:
+                    self._w("Live връзка", "ok", "сесията е отворена")
+                    self._w("Гласов поздрав", "run")
+                    self.live_text_queue.put(
+                        "Системна проверка приключи. Кажи КРАТКО на български, че всичко "
+                        "е наред и си готов за стрийма. Едно изречение."
+                    )
+                    time.sleep(4)
+                    self._w("Гласов поздрав", "ok", "AI-то проговори")
+                else:
+                    self._w("Live връзка", "err", "не се отвори — виж лога")
+                    fatal = True
+
+        # ---------- 7. TikTok ----------
+        src = self.connection_mode.get()
+        if src.startswith("TikFinity"):
+            self._w("TikFinity", "run")
+            try:
+                import socket
+                from urllib.parse import urlparse
+                u = urlparse(self.tikfinity_url_entry.get().strip())
+                s = socket.create_connection((u.hostname or "localhost", u.port or 21213), timeout=3)
+                s.close()
+                self._w("TikFinity", "ok", "приложението отговаря")
+            except Exception:
+                self._w("TikFinity", "err",
+                        "не отговаря — пусни TikFinity и го свържи към стрийма")
+                fatal = True
+        else:
+            name = self.username_entry.get().strip().lstrip("@")
+            self._w("TikTok потребител", "ok" if name else "warn",
+                    f"@{name}" if name else "не е въведен — попълни го после")
+
+        self.wizard_ok = not fatal
+        self.wizard_done = True
+        self._log("[Проверка] " + ("✓ Всичко е наред." if not fatal else "✗ Има проблеми — виж списъка."))
