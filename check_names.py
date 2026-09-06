@@ -13,6 +13,20 @@ import builtins
 import sys
 from pathlib import Path
 
+# Конзолата на Windows често не е UTF-8 и печатането на кирилица я чупи.
+# Затова изрично я превключваме, а ако не стане — минаваме на ASCII.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+
+def out(text: str):
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"))
+
 FILES = ["engine.py", "web_main.py", "core_lib.py", "api_module.py", "live_module.py"]
 
 
@@ -96,15 +110,15 @@ def main() -> int:
         problems = check(p)
         if problems:
             bad = True
-            print(f"✗ {name}:")
+            out(f"[FAIL] {name}:")
             for line, ident in sorted(set(problems)):
-                print(f"    ред {line}: '{ident}' не е дефинирано или внесено")
+                out(f"    line {line}: '{ident}' is not defined or imported")
         else:
-            print(f"✓ {name}")
+            out(f"[ ok ] {name}")
     if bad:
-        print("\nПострояването се спира — поправи имената по-горе.")
+        out("\nBuild stopped - fix the names above.")
         return 1
-    print("\nВсички имена са налични.")
+    out("\nAll names resolved.")
     return 0
 
 
