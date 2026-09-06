@@ -25,6 +25,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Check for missing names
+        run: python check_names.py
+
       - name: Build EXE with PyInstaller
         run: |
           pyinstaller --noconfirm --onefile --windowed --name TikTokTTS `
