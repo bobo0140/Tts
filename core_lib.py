@@ -448,7 +448,11 @@ def call_gemini(api_key: str, model: str, nickname: str, comment: str,
         GEMINI_SYSTEM_PROMPT + mood + streamer_line(streamer_name)
         + f'\n\nПотребител "{nickname}" написа: "{comment}"'
     )
-    payload = json.dumps({"contents": [{"parts": [{"text": prompt}]}]}).encode("utf-8")
+    payload = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        # Без "мислене" — за едно изречение реакция то само бави.
+        "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}},
+    }).encode("utf-8")
 
     req = urllib.request.Request(
         url, data=payload, headers={"Content-Type": "application/json"}, method="POST"

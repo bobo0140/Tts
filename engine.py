@@ -1267,12 +1267,18 @@ class Engine:
         if level < 1 and not native_audio:
             speech_config["languageCode"] = "bg-BG"
 
+        gen_cfg = {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": speech_config,
+        }
+        # Новите модели "мислят" преди да отговорят. За кратки реплики в
+        # стрийм това е чиста загуба на секунди — изключваме го.
+        if level < 3:
+            gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
+
         setup = {
             "model": f"models/{model}",
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": speech_config,
-            },
+            "generationConfig": gen_cfg,
             "systemInstruction": {
                 "parts": [{"text": (
                     LIVE_SYSTEM_PROMPT
@@ -1485,8 +1491,10 @@ class Engine:
                             self.audio_written_bytes = getattr(self, "audio_written_bytes", 0) + len(pcm)
                         except Exception:
                             pass
+                    if part.get("thought"):
+                        continue          # вътрешно разсъждение — не ни интересува
                     text = part.get("text")
-                    if text:
+                    if text and not text.lstrip().startswith("**"):
                         self._log(f"[Live AI] {text}")
 
         async def run(level):
