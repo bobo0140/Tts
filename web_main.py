@@ -358,7 +358,7 @@ for _m in [
     "test_burst_follows", "test_burst_shares", "test_burst_gifts",
     "test_burst_comments", "test_gemini_connection", "test_ai_commentator",
     "test_microphone", "test_audio_output", "test_api_full", "test_live_feed",
-    "selftest_live",
+    "selftest_live", "preview_live_voice",
 ]:
     setattr(Api, _m, _delegate(_m))
 

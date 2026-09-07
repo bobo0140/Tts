@@ -142,6 +142,8 @@ function pageAI() {
          ${btn("Спри","api.stop_live_ai()")}</div>`
     + row("Live модел", select("live_model_entry", S._live_models || []))
     + row("Глас на AI-то", select("live_voice_menu", ["Puck","Charon","Kore","Fenrir","Aoede"]))
+    + `<div class="toolbar" style="margin:0 0 6px">${btn("🔊 Чуй този глас","api.preview_live_voice()")}</div>`
+    + hint("Гласовете произнасят българския различно. Свържи се, после пробвай всеки с една и съща фраза и избери най-добрия. Същото важи и за моделите отгоре.")
     + row("Сила на звука", slider("live_volume_slider", 0.05, 2.5, 0.01, "mult"))
     + check("live_autoreconnect_var", "Пресвързвай се автоматично")
     + `<p class="sub" style="margin:14px 0 4px">Какво да подава на AI-то:</p>`

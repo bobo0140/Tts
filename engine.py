@@ -2830,3 +2830,17 @@ class Engine:
         if getattr(self, "audio_fallback", False):
             threading.Thread(target=self._play_turn_audio, daemon=True).start()
 
+
+    def _preview_live_voice(self):
+        """Кара Live AI-то да каже една и съща фраза, за да сравняваш
+        гласовете и моделите при еднакви условия."""
+        if not (self.live_running and self.live_ws is not None):
+            self._log("[Live AI] Първо се свържи, после пробвай гласа.")
+            return
+        voice = self.live_voice_menu.get()
+        model = self.live_model_entry.get()
+        self._log(f"[Проба] Глас '{voice}', модел '{model}' — слушай произношението.")
+        self.live_text_queue.put(
+            "Кажи точно това и нищо друго: Здравейте, аз съм вашият помощник. "
+            "Днес играем заедно и се забавляваме."
+        )
