@@ -1837,7 +1837,7 @@ class Engine:
         return getattr(self, "mic_device_map", {}).get(label)
 
     def _get_selected_output_device(self):
-        label = self.live_output_menu.get()
+        label = self.output_device_menu.get()
         if label == "(по подразбиране)":
             return None
         return getattr(self, "output_device_map", {}).get(label)
@@ -1913,10 +1913,10 @@ class Engine:
             names.append(label)
             self.output_device_map[label] = idx
 
-        current = self.live_output_menu.get()
-        self.live_output_menu.configure(values=names)
+        current = self.output_device_menu.get()
+        self.output_device_list = names
         if current not in names:
-            self.live_output_menu.set("(по подразбиране)")
+            self.output_device_menu.set("(по подразбиране)")
         self._log(f"[Изход] {len(names) - 1} изходни устройства.")
 
     def toggle_mute(self):

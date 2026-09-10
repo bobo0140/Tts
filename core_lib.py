@@ -365,6 +365,10 @@ class GeminiError(Exception):
     pass
 
 
+# Модели, които отхвърлят thinkingConfig — пълни се сам при първи отказ.
+_NO_THINKING_CONFIG = set()
+
+
 def _parse_ws(raw):
     """Разчита съобщение от WebSocket — идва като bytes или str."""
     try:
@@ -454,11 +458,15 @@ def call_gemini(api_key: str, model: str, nickname: str, comment: str,
         GEMINI_SYSTEM_PROMPT + mood + streamer_line(streamer_name)
         + f'\n\nПотребител "{nickname}" написа: "{comment}"'
     )
-    payload = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        # Без "мислене" — за едно изречение реакция то само бави.
-        "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}},
-    }).encode("utf-8")
+    body = {"contents": [{"parts": [{"text": prompt}]}]}
+
+    # Изключването на "мисленето" ускорява отговора, но НЕ всеки модел го
+    # приема — някои връщат 400 INVALID_ARGUMENT за цялата заявка. Затова
+    # го пробваме и, ако бъде отхвърлено, го запомняме и повече не го пращаме.
+    if model not in _NO_THINKING_CONFIG:
+        body["generationConfig"] = {"thinkingConfig": {"thinkingBudget": 0}}
+
+    payload = json.dumps(body).encode("utf-8")
 
     req = urllib.request.Request(
         url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
@@ -467,10 +475,18 @@ def call_gemini(api_key: str, model: str, nickname: str, comment: str,
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="ignore")
+        err_body = e.read().decode("utf-8", errors="ignore")
         if e.code == 429:
             raise GeminiError("Достигнат е лимитът на Gemini API (твърде много заявки).") from e
-        raise GeminiError(f"Gemini API грешка {e.code}: {body[:200]}") from e
+
+        # Моделът не приема настройката за "мислене" — махаме я и пробваме пак.
+        if (e.code == 400 and "generationConfig" in body
+                and model not in _NO_THINKING_CONFIG):
+            _NO_THINKING_CONFIG.add(model)
+            return call_gemini(api_key, model, nickname, comment,
+                               streamer_name=streamer_name, mood=mood, timeout=timeout)
+
+        raise GeminiError(f"Gemini API грешка {e.code}: {err_body[:200]}") from e
     except urllib.error.URLError as e:
         raise GeminiError(f"Няма връзка с Gemini API: {e.reason}") from e
     except TimeoutError:
