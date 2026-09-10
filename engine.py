@@ -1372,12 +1372,20 @@ class Engine:
                     while not busy:
                         text = self.live_text_queue.get_nowait()
                         self._dbg("→", {"clientContent": text})
-                        await ws.send(json.dumps({
-                            "clientContent": {
-                                "turns": [{"role": "user", "parts": [{"text": text}]}],
-                                "turnComplete": True,
-                            }
-                        }))
+                        try:
+                            await ws.send(json.dumps({
+                                "clientContent": {
+                                    "turns": [{"role": "user", "parts": [{"text": text}]}],
+                                    "turnComplete": True,
+                                }
+                            }))
+                        except Exception:
+                            # Връзката падна точно сега — връщаме събитието
+                            # обратно, за да не се загуби при пресвързването.
+                            self.live_text_queue.put(text)
+                            self._log("[Live AI] Връзката падна при изпращане — "
+                                      "събитието се запазва за следващата сесия.")
+                            raise
                         self._log(f"[Live AI ->] {text}")
                         sent_something = True
                 except queue.Empty:
@@ -1570,7 +1578,12 @@ class Engine:
                     self.audio_fallback = False
                     self._log(f"[Live AI] И резервният изход отказа ({e2}) — само текст.")
 
-            async with websockets.connect(url, max_size=None) as ws:
+            async with websockets.connect(
+                url, max_size=None,
+                ping_interval=20,      # проверяваме връзката на 20 сек
+                ping_timeout=60,       # но чакаме отговор до 60, не 20
+                close_timeout=5,
+            ) as ws:
                 self.live_ws = ws
                 session_started = time.time()
                 session_started = time.time()
@@ -2405,7 +2418,12 @@ class Engine:
             for level in range(len(SETUP_LEVELS)):
                 try:
                     t0 = time.time()
-                    async with websockets.connect(url, max_size=None) as ws:
+                    async with websockets.connect(
+                url, max_size=None,
+                ping_interval=20,      # проверяваме връзката на 20 сек
+                ping_timeout=60,       # но чакаме отговор до 60, не 20
+                close_timeout=5,
+            ) as ws:
                         setup = self._build_setup(model, self.live_voice_menu.get(), level)
                         self._dbg("→", {"setup": setup})
                         await ws.send(json.dumps({"setup": setup}))
